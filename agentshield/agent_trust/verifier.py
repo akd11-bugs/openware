@@ -13,11 +13,15 @@ import time
 from dataclasses import dataclass, field
 
 from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from .signer import component_line
 
 ALLOWED_COMPONENTS = {"@method", "@authority", "@path", "@query"}
+SUPPORTED_ALGS = {"ed25519", "rsa-pss-sha256"}
+MIN_RSA_BITS = 2048
 MANDATORY_PARAMS = ("created", "expires", "nonce", "keyid", "alg", "tag")
 _INPUT = re.compile(r'^([a-z][a-z0-9_-]{0,15})=\(((?:"[@a-z0-9_-]+"(?: "[@a-z0-9_-]+")*)?)\)((?:;[a-z]+=(?:\d{1,12}|"[A-Za-z0-9._~-]{1,64}"))*)\Z')
 _SIG = re.compile(r"^([a-z][a-z0-9_-]{0,15})=:([A-Za-z0-9+/]+={0,2}):\Z")
@@ -69,6 +73,7 @@ class KeyRecord:
     alg: str
     public_key: bytes
     active: bool = True
+    loaded: object = None  # the parsed public key, checked once at registration
 
 
 class KeyRegistry:
@@ -82,9 +87,22 @@ class KeyRegistry:
     def register(self, agent_id: str, keyid: str, alg: str, public_key: bytes) -> None:
         if keyid in self._keys:
             raise ValueError("key id already registered")
-        if alg != "ed25519" or len(public_key) != 32:
-            raise ValueError("ed25519 public key must be 32 raw bytes")
-        self._keys[keyid] = KeyRecord(agent_id, keyid, alg, public_key)
+        if alg == "ed25519":
+            if len(public_key) != 32:
+                raise ValueError("ed25519 public key must be 32 raw bytes")
+            loaded = Ed25519PublicKey.from_public_bytes(public_key)
+        elif alg == "rsa-pss-sha256":
+            try:
+                loaded = serialization.load_der_public_key(public_key)
+            except Exception as e:  # noqa: BLE001
+                raise ValueError("invalid RSA public key (expected DER SubjectPublicKeyInfo)") from e
+            if not isinstance(loaded, rsa.RSAPublicKey):
+                raise ValueError("not an RSA public key")
+            if loaded.key_size < MIN_RSA_BITS:
+                raise ValueError(f"RSA keys must be at least {MIN_RSA_BITS} bits")
+        else:
+            raise ValueError(f"unsupported algorithm {alg}")
+        self._keys[keyid] = KeyRecord(agent_id, keyid, alg, public_key, loaded=loaded)
         self._agents_active.setdefault(agent_id, True)
 
     def revoke_key(self, keyid: str) -> None:
@@ -174,7 +192,7 @@ class Verifier:
         for name in MANDATORY_PARAMS:
             if name not in params:
                 return Result("invalid", f"missing_param:{name}")
-        if params["alg"] != "ed25519":
+        if params["alg"] not in SUPPORTED_ALGS:
             return Result("invalid", "unsupported_alg")
         if not isinstance(params["created"], int) or not isinstance(params["expires"], int) or not _NONCE.match(str(params["nonce"])):
             return Result("invalid", "malformed_signature")
@@ -207,7 +225,12 @@ class Verifier:
         base = "\n".join([component_line(c, req.method, req.authority, req.path, req.query.lstrip("?")) for c in covered]
                          + [f'"@signature-params": {sig_in.split("=", 1)[1]}'])
         try:
-            Ed25519PublicKey.from_public_bytes(rec.public_key).verify(base64.b64decode(m_sig.group(2)), base.encode())
+            sig_bytes = base64.b64decode(m_sig.group(2))
+            if rec.alg == "ed25519":
+                rec.loaded.verify(sig_bytes, base.encode())
+            else:  # rsa-pss-sha256; the salt length is not pinned because signers differ (hash length or maximum)
+                rec.loaded.verify(sig_bytes, base.encode(), padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.AUTO),
+                                  hashes.SHA256())
         except (InvalidSignature, ValueError):
             return Result("invalid", "bad_signature", rec.agent_id)
         # Record the nonce only after the signature is valid, so a forger cannot burn a victim's nonce.

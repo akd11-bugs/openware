@@ -166,8 +166,13 @@ def test_revoked_agent_with_active_key_is_invalid(registry, keys):
 
 
 def test_algorithm_must_match_key_record(registry, keys):
-    h = signed(keys, alg="rsa-pss-sha256")
-    assert check(make(registry), h).reason == "unsupported_alg"
+    h = signed(keys, alg="rsa-pss-sha256")  # an Ed25519 key cannot be used under an RSA claim
+    r = check(make(registry), h)
+    assert (r.outcome, r.reason) == ("invalid", "alg_mismatch")
+
+
+def test_unsupported_algorithm_is_rejected(registry, keys):
+    assert check(make(registry), signed(keys, alg="hmac-sha256")).reason == "unsupported_alg"
 
 
 def test_browsing_tag_cannot_authorise_payment_route(registry, keys):
@@ -255,3 +260,67 @@ def test_one_agent_key_cannot_exhaust_the_nonce_store_for_others(registry, keys)
     outcomes = [check(v, signed(keys, who="k1", nonce=f"nonce-aaaa-{i:04d}")).outcome for i in range(5)]
     assert outcomes == ["verified"] * 3 + ["unverified"] * 2
     assert check(v, signed(keys, who="k2", nonce="nonce-bbbb-0001")).outcome == "verified"
+
+
+# ---- RSA-PSS-SHA256 ----
+from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def rsa_keys():
+    return {"r1": rsa.generate_private_key(65537, 2048), "r2": rsa.generate_private_key(65537, 2048)}
+
+
+@pytest.fixture
+def rsa_registry(registry, rsa_keys):
+    registry.register("agent-rsa", "r1", "rsa-pss-sha256", public_bytes(rsa_keys["r1"]))
+    registry.register("agent-rsa2", "r2", "rsa-pss-sha256", public_bytes(rsa_keys["r2"]))
+    return registry
+
+
+def rsa_signed(rsa_keys, who="r1", **kw):
+    kw.setdefault("method", "GET")
+    kw.setdefault("authority", HOST)
+    kw.setdefault("path", "/product/42")
+    kw.setdefault("tag", "agent-browser-auth")
+    kw.setdefault("now", NOW)
+    return sign_request(rsa_keys[who], who, **kw)
+
+
+def test_rsa_pss_signed_request_is_verified(rsa_registry, rsa_keys):
+    r = check(make(rsa_registry), rsa_signed(rsa_keys))
+    assert (r.outcome, r.agent_id) == ("verified", "agent-rsa")
+
+
+def test_rsa_signature_from_the_wrong_rsa_key_is_invalid(rsa_registry, rsa_keys):
+    forged = sign_request(rsa_keys["r2"], "r1", method="GET", authority=HOST, path="/product/42",
+                          tag="agent-browser-auth", now=NOW)
+    assert check(make(rsa_registry), forged).reason == "bad_signature"
+
+
+def test_rsa_key_cannot_be_used_under_an_ed25519_claim(rsa_registry, rsa_keys):
+    h = rsa_signed(rsa_keys, alg="ed25519")
+    assert check(make(rsa_registry), h).reason == "alg_mismatch"
+
+
+def test_rsa_signature_with_a_maximum_length_salt_still_verifies(rsa_registry, rsa_keys):
+    # Visa's sample signs with the maximum PSS salt length, so verification must not insist on one salt length
+    h = rsa_signed(rsa_keys, rsa_salt="max")
+    assert check(make(rsa_registry), h).outcome == "verified"
+
+
+def test_rsa_replay_is_still_caught(rsa_registry, rsa_keys):
+    v = make(rsa_registry)
+    h = rsa_signed(rsa_keys, nonce="rsa-nonce-0001")
+    assert check(v, h).outcome == "verified" and check(v, h).reason == "replayed_nonce"
+
+
+def test_weak_rsa_keys_cannot_be_registered(registry):
+    weak = rsa.generate_private_key(65537, 1024)
+    with pytest.raises(ValueError, match="2048"):
+        registry.register("a", "weak", "rsa-pss-sha256", public_bytes(weak))
+
+
+def test_garbage_rsa_public_key_is_rejected_at_registration(registry):
+    with pytest.raises(ValueError):
+        registry.register("a", "bad", "rsa-pss-sha256", b"not a key")
