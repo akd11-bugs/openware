@@ -4,6 +4,13 @@ The big changes and why we made them. Small fixes are in git history. Newest fir
 
 ## 2026-11-01
 
+- **Open items closed.** Visa's own signing code and sample registry now run through the verifier: RSA-PSS and Ed25519 signatures verify, and the sample registry's shared key id `primary` is refused for both agents. A live public key directory was fetched and its real signature verified. Why: until then the interop claim rested on headers we had built ourselves.
+- **Key directory signatures.** A directory can be required to be signed by its own keys. Real directories sign only the host and publish timestamps in milliseconds, so accepting that is an explicit setting, and milliseconds are read as milliseconds.
+- **Sandbox for model-written code.** The auto-search child process now runs in a macOS sandbox with no network, writes only to the results and cache folders, and no reading of credentials or `.env` files. It refuses to run unsandboxed elsewhere unless told to.
+- **Redis nonce store and service settings.** Replay protection can live in Redis (tested against a fake client only). The service reads key directory, registry file, per-tenant policy, Redis URL and a warm-start file from the environment.
+- **Warm start.** Recent history can be loaded into the feature store at startup. Correction to an earlier note: on the same window a cold store gave 3.6% challenges against 5.0% warm, so cold start under-alerts rather than over-alerts.
+- **Meeting prep.** A one page summary, a five minute demo script, and `scripts/demo_api.py` with eight scenarios.
+
 - **Agent verifier finished in five rounds.** RSA-PSS next to Ed25519 with the algorithm pinned to the key record. Signed request bodies through content-digest. A key directory fetcher that refuses private addresses, follows no redirects, caps size and key count, and caches failures for five minutes, with keys looked up by directory and thumbprint. Per-tenant agent policy in the API: pinned domains and paths, a tag to route map, no trust without a signed request. An interoperability test built on the shape of Visa's public sample. 132 tests now cover the verifier.
 - **Differences from Visa's sample are explicit choices.** The sample uses `keyId`, signs only authority and path, and accepts the query string inside the path. We stay strict by default and offer a `visa_compat` setting, and a tenant can relax the required components. Spaces after semicolons are now accepted because the standard allows them.
 

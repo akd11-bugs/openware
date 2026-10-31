@@ -188,3 +188,16 @@ def test_the_cache_is_bounded():
         with pytest.raises(DirectoryError):
             f.keys(f"https://h{i}.example.com/d")
     assert len(f._cache) <= 5
+
+
+def test_millisecond_timestamps_are_read_as_milliseconds():
+    # a real public directory publishes nbf as 1743465600000 (April 2025 in milliseconds); read as seconds it never starts
+    past_ms = ed_jwk(nbf=(NOW - 1000) * 1000)[1]
+    future_ms = ed_jwk(nbf=(NOW + 1000) * 1000)[1]
+    expired_ms = ed_jwk(exp=(NOW - 1000) * 1000)[1]
+    keys = parse_directory(body_of(past_ms, future_ms, expired_ms), NOW, 20)
+    assert list(keys) == [jwk_thumbprint(past_ms)]
+
+
+def test_second_timestamps_keep_working():
+    assert len(parse_directory(body_of(ed_jwk(nbf=NOW - 5)[1], ed_jwk(exp=NOW + 5)[1]), NOW, 20)) == 2

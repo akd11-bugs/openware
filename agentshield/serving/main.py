@@ -5,9 +5,14 @@ Environment:
   AGENTSHIELD_MODEL_DIR          model folder (default models/portable_v1)
   AGENTSHIELD_AUDIT              optional path for the JSONL audit log; then AGENTSHIELD_AUDIT_SALT is required too
   AGENTSHIELD_TRUST_CLIENT_TS=1  benchmark/replay only: use the client's timestamp for feature state
+  AGENTSHIELD_WARM_START         JSONL of recent past transactions (customer_id, amount_minor, timestamp, optional payee_id and
+                                 device_id) loaded into the demo tenant's feature store before serving; capped by
+                                 AGENTSHIELD_WARM_START_MAX (default 2,000,000 lines)
 Agent trust (all optional; with none of them set, signed agent requests are challenged, never trusted):
   AGENTSHIELD_AGENT_DIRECTORY=1      fetch keys from the key directory named in Signature-Agent (https, public hosts only)
   AGENTSHIELD_REQUIRE_SIGNED_DIRECTORY=1  only trust directory keys that signed the directory response themselves
+  AGENTSHIELD_DIRECTORY_ALLOW_UNBOUND_BODY=1  with the above, also accept directories that sign only the request authority (the
+                                     profile real directories use today); the body is then not bound by the signature
   AGENTSHIELD_VISA_REGISTRY_DB       path to a registry file shaped like Visa's sample (read only)
   AGENTSHIELD_AGENT_POLICY           JSON: {"authorities": [...], "paths": [...], "tag_routes": {"tag": ["/route"]}}
   AGENTSHIELD_REDIS_URL              keep replay protection (nonces) in Redis; needs the redis package
@@ -21,7 +26,9 @@ from agentshield.agent_trust.redis_store import RedisNonceStore
 from agentshield.agent_trust.verifier import InMemoryNonceStore, KeyRegistry, Policy, Verifier
 from agentshield.agent_trust.visa_registry import load_visa_registry
 
-from .app import create_app
+from pydantic import ValidationError
+
+from .app import WarmEvent, create_app
 from .tenants import Tenant, TenantRegistry, hash_key
 
 
@@ -54,6 +61,24 @@ def _nonce_store(env, redis_from_url):
     return RedisNonceStore(redis_from_url(url))
 
 
+def load_warm_events(path, limit: int) -> list:
+    p = Path(path)
+    if not p.is_file():
+        raise RuntimeError("AGENTSHIELD_WARM_START file not found, cannot warm the feature store")
+    events = []
+    with open(p) as f:
+        for n, line in enumerate(f, start=1):
+            if not line.strip():
+                continue
+            if len(events) >= limit:
+                raise RuntimeError(f"warm start file has more than the allowed at most {limit} events")
+            try:
+                events.append(WarmEvent(**json.loads(line)))
+            except (ValueError, ValidationError, TypeError):  # never echo the line: it may hold customer data
+                raise RuntimeError(f"warm start file: invalid event on line {n}") from None
+    return events
+
+
 def build(env=None, redis_from_url=None):
     env = os.environ if env is None else env
     key = env.get("AGENTSHIELD_API_KEY", "")
@@ -69,14 +94,18 @@ def build(env=None, redis_from_url=None):
     if env.get("AGENTSHIELD_VISA_REGISTRY_DB"):
         registry, _report = load_visa_registry(env["AGENTSHIELD_VISA_REGISTRY_DB"])
     if env.get("AGENTSHIELD_AGENT_DIRECTORY") == "1":
-        directory = KeyDirectoryFetcher(require_signed=env.get("AGENTSHIELD_REQUIRE_SIGNED_DIRECTORY") == "1")
+        directory = KeyDirectoryFetcher(require_signed=env.get("AGENTSHIELD_REQUIRE_SIGNED_DIRECTORY") == "1",
+                                        bind_body=env.get("AGENTSHIELD_DIRECTORY_ALLOW_UNBOUND_BODY") != "1")
     verifier = None
     if env.get("AGENTSHIELD_VISA_REGISTRY_DB") or directory is not None:
         verifier = Verifier(registry, _nonce_store(env, redis_from_url), Policy(), directory=directory)
     audit = env.get("AGENTSHIELD_AUDIT")
-    return create_app(Path(env.get("AGENTSHIELD_MODEL_DIR", "models/portable_v1")), TenantRegistry([tenant]), verifier,
-                      audit_path=Path(audit) if audit else None, audit_salt=env.get("AGENTSHIELD_AUDIT_SALT"),
-                      trust_client_ts=env.get("AGENTSHIELD_TRUST_CLIENT_TS") == "1")
+    app = create_app(Path(env.get("AGENTSHIELD_MODEL_DIR", "models/portable_v1")), TenantRegistry([tenant]), verifier,
+                     audit_path=Path(audit) if audit else None, audit_salt=env.get("AGENTSHIELD_AUDIT_SALT"),
+                     trust_client_ts=env.get("AGENTSHIELD_TRUST_CLIENT_TS") == "1")
+    if env.get("AGENTSHIELD_WARM_START"):
+        app.state.warm(tenant.tenant_id, load_warm_events(env["AGENTSHIELD_WARM_START"], int(env.get("AGENTSHIELD_WARM_START_MAX", 2_000_000))))
+    return app
 
 
 app = build()

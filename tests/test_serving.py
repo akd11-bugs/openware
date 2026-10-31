@@ -316,6 +316,7 @@ def test_a_tenant_with_no_agent_policy_does_not_trust_agent_signatures(client):
 def test_an_actor_who_says_agent_but_proves_nothing_is_challenged(client):
     r = post(client, {**txn(1, amount=1000), "actor": "agent"}).json()
     assert r["action"] == "challenge" and r["agent"]["reason"] == "agent_not_proven"
+    assert r["reasons"][0]["code"] == "AGENT_NOT_PROVEN"  # not AGENT_AGENT_NOT_PROVEN
 
 
 def test_no_agent_claim_is_made_when_nothing_is_declared(client):
@@ -336,3 +337,51 @@ def test_tenant_agent_settings_are_validated():
         Tenant("x", "h", agent_authorities=("Shop.IN",))  # authorities are compared as given, so they must be lower case
     with pytest.raises(ValueError):
         Tenant("x", "h", agent_path_prefixes=("product",))  # must start with a slash
+
+
+# ---- warm start ----
+from agentshield.serving.app import WarmEvent  # noqa: E402
+
+
+def warm_events(n=6, customer="c9", start=NOW - 3 * 86400, step=3600, amount=1000):
+    return [WarmEvent(customer_id=customer, amount_minor=amount, timestamp=start + i * step) for i in range(n)]
+
+
+def test_warming_gives_a_new_request_its_customers_history(client):
+    assert client.app.state.warm("t1", warm_events()) == 6
+    f = client.app.state.store_for("t1").features("c9", None, NOW, 1000)
+    assert f["sender_prior_cnt"] == 6 and f["card_cnt_604800s"] == 6
+    r = post(client, {**txn(1, amount=1000), "customer_id": "c9"}).json()
+    assert r["action"] == "allow"
+
+
+def test_warm_events_can_arrive_in_any_order(client):
+    ev = warm_events()
+    client.app.state.warm("t1", list(reversed(ev)))
+    f = client.app.state.store_for("t1").features("c9", None, NOW, 1000)
+    assert f["sender_prior_cnt"] == 6 and f["sender_since_last"] == NOW - ev[-1].timestamp
+
+
+def test_warming_one_tenant_does_not_touch_another(client):
+    client.app.state.warm("t1", warm_events())
+    assert client.app.state.store_for("t2").features("c9", None, NOW, 1000)["sender_prior_cnt"] == 0
+
+
+def test_a_warmed_history_makes_a_later_spike_visible(client):
+    client.app.state.warm("t1", warm_events(n=8, amount=1000))
+    r = post(client, {**txn(1, amount=50_000), "customer_id": "c9"}).json()
+    assert "ONLINE_AMOUNT_SPIKE" in r["anomaly_flags"]
+
+
+def test_late_events_after_a_warm_start_cannot_rewrite_history(client):
+    ev = warm_events(n=3, start=NOW - 100, step=10)  # the newest warmed event is NOW - 80
+    client.app.state.warm("t1", ev)
+    post(client, {**txn(1, amount=1000), "customer_id": "c9", "timestamp": NOW - 5000})  # claims to be older than the history
+    f = client.app.state.store_for("t1").features("c9", None, NOW + 10, 1000)
+    assert f["sender_prior_cnt"] == 4 and f["sender_since_last"] <= 100
+
+
+def test_warm_events_are_validated():
+    for bad in ({"amount_minor": -1}, {"customer_id": "bad id;"}, {"timestamp": -5}):
+        with pytest.raises(Exception):
+            WarmEvent(**{"customer_id": "c1", "amount_minor": 1, "timestamp": 1, **bad})

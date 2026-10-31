@@ -110,3 +110,35 @@ def test_signed_directories_can_be_required(model):
     app = build(model, AGENTSHIELD_AGENT_DIRECTORY="1", AGENTSHIELD_REQUIRE_SIGNED_DIRECTORY="1")
     assert app.state.verifier.directory.require_signed is True
     assert build(model, AGENTSHIELD_AGENT_DIRECTORY="1").state.verifier.directory.require_signed is False  # off unless asked
+
+
+def write_warm(path, n=5, bad=None):
+    lines = [json.dumps({"customer_id": "c1", "amount_minor": 1000, "timestamp": 1_700_000_000 + i * 60}) for i in range(n)]
+    if bad:
+        lines.insert(2, bad)
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def test_a_warm_start_file_fills_the_store_at_startup(model, tmp_path):
+    app = build(model, AGENTSHIELD_WARM_START=str(write_warm(tmp_path / "warm.jsonl")))
+    f = app.state.store_for("demo").features("c1", None, 1_700_000_000 + 10_000, 1000)
+    assert f["sender_prior_cnt"] == 5
+
+
+def test_a_bad_warm_line_stops_startup_without_echoing_its_content(model, tmp_path):
+    p = write_warm(tmp_path / "warm.jsonl", bad='{"customer_id": "c1", "amount_minor": -5, "timestamp": 1, "note": "SECRETVALUE"}')
+    with pytest.raises(RuntimeError, match="line 3") as e:
+        build(model, AGENTSHIELD_WARM_START=str(p))
+    assert "SECRETVALUE" not in str(e.value)
+
+
+def test_a_missing_warm_file_stops_startup(model, tmp_path):
+    with pytest.raises(RuntimeError, match="warm"):
+        build(model, AGENTSHIELD_WARM_START=str(tmp_path / "nope.jsonl"))
+
+
+def test_the_number_of_warm_events_is_capped(model, tmp_path):
+    p = write_warm(tmp_path / "warm.jsonl", n=20)
+    with pytest.raises(RuntimeError, match="at most"):
+        build(model, AGENTSHIELD_WARM_START=str(p), AGENTSHIELD_WARM_START_MAX="10")

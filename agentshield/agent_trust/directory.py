@@ -77,6 +77,11 @@ def check_url(url: str, resolve=default_resolve) -> tuple[str, str, str]:
     return host, ips[0], path
 
 
+def _seconds(v):
+    """Timestamps are seconds, but some real directories publish milliseconds (for example nbf 1743465600000)."""
+    return v / 1000 if isinstance(v, (int, float)) and v > 1e11 else v
+
+
 def _b64u_decode(s: str) -> bytes:
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 
@@ -104,7 +109,7 @@ def parse_directory(body: bytes, now: float, max_keys: int = MAX_KEYS) -> dict:
         try:
             if not isinstance(jwk, dict) or jwk.get("use", "sig") != "sig":
                 continue
-            nbf, exp = jwk.get("nbf"), jwk.get("exp")
+            nbf, exp = _seconds(jwk.get("nbf")), _seconds(jwk.get("exp"))
             if (nbf is not None and nbf > now) or (exp is not None and exp <= now):
                 continue
             if jwk.get("kty") == "OKP" and jwk.get("crv") == "Ed25519":
@@ -144,11 +149,12 @@ def default_http_get(ip: str, host: str, path: str, timeout: float, max_bytes: i
 class KeyDirectoryFetcher:
     def __init__(self, resolve=default_resolve, http_get=default_http_get, clock=time.time, timeout: float = TIMEOUT,
                  max_bytes: int = MAX_BYTES, max_keys: int = MAX_KEYS, pos_ttl: int = POS_TTL, neg_ttl: int = NEG_TTL,
-                 max_cache: int = 1000, require_signed: bool = False) -> None:
+                 max_cache: int = 1000, require_signed: bool = False, bind_body: bool = True) -> None:
         self._resolve, self._http_get, self._clock = resolve, http_get, clock
         self.timeout, self.max_bytes, self.max_keys = timeout, max_bytes, max_keys
         self.pos_ttl, self.neg_ttl, self.max_cache = pos_ttl, neg_ttl, max_cache
         self.require_signed = require_signed  # only keep keys that signed the directory response themselves
+        self.bind_body = bind_body  # False also accepts signatures that cover only the request authority
         self._cache: OrderedDict = OrderedDict()  # url -> (expires_at, keys or None)
 
     def keys(self, url: str) -> dict:
@@ -171,7 +177,7 @@ class KeyDirectoryFetcher:
                 raise DirectoryError("response too large")
             keys = parse_directory(body, now, self.max_keys)
             if self.require_signed:
-                signed = verify_directory_signatures(resp_headers, body, host, keys, now)
+                signed = verify_directory_signatures(resp_headers, body, host, keys, now, self.bind_body)
                 keys = {k: v for k, v in keys.items() if k in signed}
                 if not keys:
                     raise DirectoryError("directory is not signed by its own keys")

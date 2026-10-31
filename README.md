@@ -10,10 +10,10 @@ A risk API for fintechs. One call checks a payment for fraud, flags unusual beha
 | Fraud model for the API (23 portable fields) | AUC 0.788, catches 11.8% at 1% false alarms | Only uses fields any feed can supply |
 | Mule detection, account graph features | PaySim: AUC 0.971, catches 75.2% at 1% false alarms (without graph features 0.944 and 50.5%). IBM AML: AUC 0.982 and 73.9% (without 0.946 and 50.4%) | Both datasets are synthetic. Gains are largest for fan-in, fan-out and gather-scatter rings and small for cycles |
 | Anomaly detector, rapid repeats | Fraud is 2.2x more common in flagged rows | Real card data, flags 6% of traffic, so it is noisy |
-| Agent verification | 132 tests pass, about 43 microseconds per Ed25519 check and 19 per RSA-PSS check | Forged, replayed, expired and body-swapped requests. Checked against the shape of Visa's public sample, not a live agent |
+| Agent verification | 185 tests, about 43 microseconds per Ed25519 check and 19 per RSA-PSS check | Run against Visa's own signing code and sample registry, and a live public key directory. Forged, replayed, expired and body-swapped requests are blocked |
 | API over local HTTP | p50 0.8 ms, p99 1.4 ms, about 1,200 requests per second | Excludes a network hop and a real Redis lookup |
 
-The Kaggle winner scored 0.9459 on a hidden test set. Ours is a different test, so the two numbers are not comparable. 314 tests pass, and they pass on a fresh clone with no data.
+The Kaggle winner scored 0.9459 on a hidden test set. Ours is a different test, so the two numbers are not comparable. On a fresh clone with no data, 372 tests pass and 15 skip (6 need the cached dataset, 9 need a checkout of Visa's sample). All 387 pass with both.
 
 ## How we got there
 
@@ -34,7 +34,9 @@ The Kaggle winner scored 0.9459 on a hidden test set. Ours is a different test, 
 - The first API version shared state across tenants and trusted client timestamps. Both are fixed.
 - Validation looked better than the test period by 0.025 AUC, because we tuned on it.
 - Agent loops sometimes stopped early or kept running after we stopped them, so long searches now run as plain scripts.
-- Visa's public sample differs from the standard in small ways (a camel-case key id, no method signed). Our strict verifier rejected it out of the box, so each difference is now an explicit setting.
+- Visa's public sample differs from the standard in small ways (a camel-case key id, no method signed, two agents sharing a key id). Our strict verifier rejected it out of the box, so each difference is now an explicit setting.
+- A real public key directory signs only the host, not the body, and writes timestamps in milliseconds. Our first parser rejected it, so those are explicit settings now.
+- We said a cold feature store over-alerted (15%). A controlled comparison on the same window showed the opposite: 3.6% cold against 5.0% warm. The 15% came from the unusual first days of the dataset.
 
 ## What we can still do
 
@@ -42,7 +44,7 @@ The Kaggle winner scored 0.9459 on a hidden test set. Ours is a different test, 
 - Use richer fields such as payee history, device IDs and KYC status.
 - Test mule detection on real bank data with labelled mule accounts, and build the online version of the graph features.
 - Move the feature and nonce state to Redis, and add Kafka.
-- Add rate limits at a proxy, and run the verifier against a live Visa sample agent.
+- Add rate limits at a proxy, and run the Redis nonce store against a live Redis server.
 - Try Isolation Forest next to the rule detectors.
 - Get a proper data protection review before touching customer data.
 
@@ -52,6 +54,7 @@ The Kaggle winner scored 0.9459 on a hidden test set. Ours is a different test, 
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python -m pytest -q
 .venv/bin/python scripts/demo_agent_trust.py
+.venv/bin/python scripts/demo_api.py   # needs a trained model, see below
 ```
 
 Datasets download with `scripts/download_data.py` and `scripts/download_india.py` and need Kaggle credentials. To run the API, train a model with `scripts/train_serving.py --kind portable2`, set `AGENTSHIELD_API_KEY` (32 characters or more), then start `uvicorn agentshield.serving.main:app` with a single worker.
@@ -60,7 +63,7 @@ Datasets download with `scripts/download_data.py` and `scripts/download_india.py
 
 - `agentshield/txn` fraud features, loaders, baselines and the experiment harness
 - `agentshield/anomaly` rule based anomaly detectors
-- `agentshield/agent_trust` the signature verifier
+- `agentshield/agent_trust` the signature verifier, key directory fetcher and Redis nonce store
 - `agentshield/features_online` the real-time feature store
 - `agentshield/serving` the API
 - `agentshield/monitoring` drift checks

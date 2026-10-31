@@ -34,16 +34,16 @@ class Http:
         return 200, CT, self.body, self.headers
 
 
-def fetch(privs, signers, require=True, now=NOW, authority=HOST, mutate=None, extra=None, **sign_kw):
+def fetch(privs, signers, require=True, now=NOW, authority=HOST, mutate=None, extra=None, bind_body=True, **sign_kw):
     body = json.dumps({"keys": [{**jwk(p), **(extra or {})} for p in privs]}).encode()
     headers = {}
     for i, p in enumerate(signers):
-        h = sign_directory_response(p, jwk_thumbprint(jwk(p)), authority=authority, body=body, now=now, label=f"sig{i + 1}", **sign_kw)
+        h = sign_directory_response(p, jwk_thumbprint(jwk(p)), authority=authority, body=body, now=now, **{"label": f"sig{i + 1}", **sign_kw})
         for k, v in h.items():
             headers[k] = f"{headers[k]}, {v}" if k in headers and k != "content-digest" else v
     if mutate:
         body, headers = mutate(body, headers)
-    f = KeyDirectoryFetcher(resolve=lambda h: ["93.184.216.34"], http_get=Http(body, headers), clock=lambda: NOW, require_signed=require)
+    f = KeyDirectoryFetcher(resolve=lambda h: ["93.184.216.34"], http_get=Http(body, headers), clock=lambda: NOW, require_signed=require, bind_body=bind_body)
     return f.keys(URL)
 
 
@@ -141,3 +141,37 @@ def test_malformed_signature_headers_never_crash(ed):
 def test_a_lifetime_over_the_cap_is_rejected(ed):
     with pytest.raises(DirectoryError):
         fetch([ed[0]], [ed[0]], lifetime=30 * 86400)
+
+
+# ---- the profile real directories use today: only ("@authority";req) is signed, with no content-digest ----
+def drop_digest(body, headers):
+    return body, {k: v for k, v in headers.items() if k != "content-digest"}
+
+
+def test_an_authority_only_signature_is_refused_by_default_because_it_does_not_bind_the_body(ed):
+    with pytest.raises(DirectoryError):
+        fetch([ed[0]], [ed[0]], components=("@authority;req",), mutate=drop_digest)
+
+
+def test_an_authority_only_signature_is_accepted_when_the_choice_is_made_explicitly(ed):
+    keys = fetch([ed[0]], [ed[0]], components=("@authority;req",), mutate=drop_digest, bind_body=False)
+    assert list(keys) == [jwk_thumbprint(jwk(ed[0]))]
+
+
+def test_unbound_signatures_still_keep_only_the_keys_that_signed(ed):
+    keys = fetch([ed[0], ed[1]], [ed[0]], components=("@authority;req",), mutate=drop_digest, bind_body=False)
+    assert list(keys) == [jwk_thumbprint(jwk(ed[0]))]
+
+
+def test_an_authority_only_signature_for_another_host_is_still_refused(ed):
+    with pytest.raises(DirectoryError):
+        fetch([ed[0]], [ed[0]], components=("@authority;req",), mutate=drop_digest, bind_body=False, authority="other.example.com")
+
+
+def test_a_digest_only_signature_is_never_accepted_even_when_unbound_bodies_are_allowed(ed):
+    with pytest.raises(DirectoryError):
+        fetch([ed[0]], [ed[0]], components=("content-digest",), bind_body=False)
+
+
+def test_a_signature_label_with_digits_is_fine(ed):
+    assert len(fetch([ed[0]], [ed[0]], components=("@authority;req",), mutate=drop_digest, bind_body=False, label="binding0")) == 1

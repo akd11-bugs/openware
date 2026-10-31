@@ -79,6 +79,15 @@ class AssessIn(BaseModel):
     agent_request: AgentRequestIn | None = None
 
 
+class WarmEvent(BaseModel):
+    """One past transaction used to fill the feature store before going live (history only, nothing is scored)."""
+    customer_id: str = Field(min_length=1, max_length=64, pattern=ID)
+    payee_id: str | None = Field(default=None, min_length=1, max_length=64, pattern=ID)
+    amount_minor: int = Field(ge=0, le=10**13)
+    timestamp: int = Field(ge=0, le=10**11)
+    device_id: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:@ /()+-]+$")
+
+
 class FeedbackIn(BaseModel):
     transaction_id: str = Field(min_length=1, max_length=64, pattern=ID)
     label: int = Field(ge=0, le=1)
@@ -117,6 +126,20 @@ def create_app(model_dir: Path, tenants: TenantRegistry, verifier: Verifier | No
         return s
 
     app.state.store_for = store_for
+
+    def warm(tenant_id: str, events) -> int:
+        """Fill a tenant's store from recent history so the first live requests do not look like first-time customers.
+        Events are applied in time order, and later live events can never be recorded earlier than the newest of them."""
+        with lock:
+            store = store_for(tenant_id)
+            n = 0
+            for e in sorted(events, key=lambda e: e.timestamp):
+                store.update(e.customer_id, e.payee_id, e.timestamp, e.amount_minor, e.device_id)
+                last_ts[tenant_id] = max(last_ts.get(tenant_id, 0), e.timestamp)
+                n += 1
+            return n
+
+    app.state.warm = warm
 
     def tenant_dep(x_api_key: str | None = Header(default=None)) -> Tenant:
         t = tenants.authenticate(x_api_key)
@@ -197,7 +220,8 @@ def create_app(model_dir: Path, tenants: TenantRegistry, verifier: Verifier | No
                     log.warning("reason codes failed (%s)", type(e).__name__)
                     reasons = []
             if agent_action != "allow" and agent is not None:
-                reasons.insert(0, {"code": f"AGENT_{agent['reason'].upper()}", "text": f"Agent check: {agent['reason']}"})
+                code = agent["reason"].upper() if agent["reason"].startswith("agent_") else f"AGENT_{agent['reason'].upper()}"
+                reasons.insert(0, {"code": code, "text": f"Agent check: {agent['reason']}"})
             if score is None:
                 reasons.append({"code": "SCORING_UNAVAILABLE", "text": "Risk score unavailable; challenged for safety"})
             reasons += [{"code": f, "text": f.replace("ONLINE_", "").replace("_", " ").title()} for f in flags]
