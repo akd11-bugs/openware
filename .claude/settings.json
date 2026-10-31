@@ -1,0 +1,21 @@
+
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(.venv/bin/python -m pytest *)",
+      "Bash(.venv/bin/python scripts/data_report.py)",
+      "Bash(.venv/bin/python scripts/run_baseline.py)",
+      "Bash(.venv/bin/python scripts/train_ieee.py *)",
+      "Bash(git status)", "Bash(git diff *)", "Bash(git log *)"
+    ],
+    "deny": [
+      "Read(./.env)", "Read(./.env.*)", "Read(~/.kaggle/**)",
+      "Bash(cat ~/.kaggle/*)", "Bash(git push --force *)", "Bash(rm -rf *)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [{ "matcher": "Edit|Write", "hooks": [{ "type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/protect-paths.sh" }] }],
+    "PostToolUse": [{ "matcher": "Edit|Write", "hooks": [{ "type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/run-tests.sh" }] }]
+  }
+}

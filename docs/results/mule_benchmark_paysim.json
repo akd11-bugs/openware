@@ -1,0 +1,73 @@
+{
+  "dataset": "PaySim (synthetic)",
+  "test_rows": 1536191,
+  "gap_s": 86400,
+  "results": {
+    "rules (balance=False)": {
+      "auc": 0.8687,
+      "recall@1%": 0.2291,
+      "recall@0.1%": 0.096,
+      "precision@top1%": 0.0635
+    },
+    "rules (balance=True)": {
+      "auc": 0.9295,
+      "recall@1%": 0.2856,
+      "recall@0.1%": 0.0924,
+      "precision@top1%": 0.0808
+    },
+    "A model, no balance, no graph": {
+      "auc": 0.9438,
+      "recall@1%": 0.5053,
+      "recall@0.1%": 0.4014,
+      "precision@top1%": 0.1411,
+      "features": 3,
+      "iters": 87
+    },
+    "B model, no balance, + graph": {
+      "auc": 0.971,
+      "recall@1%": 0.7523,
+      "recall@0.1%": 0.2636,
+      "precision@top1%": 0.2028,
+      "features": 16,
+      "iters": 103
+    },
+    "C model, balance, no graph": {
+      "auc": 0.9999,
+      "recall@1%": 0.9995,
+      "recall@0.1%": 0.9773,
+      "precision@top1%": 0.2832,
+      "features": 7,
+      "iters": 256
+    },
+    "D model, balance, + graph": {
+      "auc": 0.9999,
+      "recall@1%": 0.9998,
+      "recall@0.1%": 0.9515,
+      "precision@top1%": 0.2831,
+      "features": 20,
+      "iters": 252
+    }
+  },
+  "graph_gain_ci95": {
+    "B minus A": {
+      "auc": [
+        0.0249,
+        0.029
+      ],
+      "recall@1%": [
+        0.2324,
+        0.2626
+      ]
+    },
+    "D minus C": {
+      "auc": [
+        -0.0001,
+        -0.0
+      ],
+      "recall@1%": [
+        0.0,
+        0.0007
+      ]
+    }
+  }
+}

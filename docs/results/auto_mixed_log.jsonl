@@ -1,0 +1,3 @@
+{"round": 1, "tokens": 1422, "label": "group card_device_first_seen", "val_auc": 0.9247, "gain": -0.0016, "kept": false}
+{"round": 2, "tokens": 1519, "label": "group card_email_addr_novelty", "val_auc": 0.92506, "gain": -0.00124, "kept": false}
+{"round": 3, "error": "AttributeError: 'ThinkingBlock' object has no attribute 'text'"}

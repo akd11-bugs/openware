@@ -1,0 +1,1 @@
+{"model": "lgbm", "groups": ["card_hist"], "params": {}, "features": 437, "production_valid": true, "iters": 158, "val_rows": 63582, "val_auc": 0.92341, "val_recall@1%": 0.4916, "val_recall@0.1%": 0.2659, "val_logloss": 0.0996, "seconds": 41.8, "agent": "smoke"}

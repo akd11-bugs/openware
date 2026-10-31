@@ -1,0 +1,77 @@
+{
+  "dataset": "ibm_aml",
+  "test_rows": 1041381,
+  "gap_s": 86400,
+  "results": {
+    "A model, no graph": {
+      "auc": 0.9459,
+      "recall@1%": 0.5044,
+      "recall@0.1%": 0.1595,
+      "precision@top1%": 0.0862,
+      "features": 6,
+      "iters": 60
+    },
+    "B model, + graph": {
+      "auc": 0.9819,
+      "recall@1%": 0.7385,
+      "recall@0.1%": 0.4715,
+      "precision@top1%": 0.1265,
+      "features": 19,
+      "iters": 65
+    }
+  },
+  "graph_gain_ci95": {
+    "B model, + graph minus A model, no graph": {
+      "auc": [
+        0.0312,
+        0.0412
+      ],
+      "recall@1%": [
+        0.2145,
+        0.2613
+      ]
+    }
+  },
+  "recall_by_pattern_at_1pct_fpr": {
+    "BIPARTITE": {
+      "transactions": 75,
+      "A model, no graph": 0.587,
+      "B model, + graph": 0.667
+    },
+    "CYCLE": {
+      "transactions": 110,
+      "A model, no graph": 0.673,
+      "B model, + graph": 0.745
+    },
+    "FAN-IN": {
+      "transactions": 140,
+      "A model, no graph": 0.679,
+      "B model, + graph": 0.9
+    },
+    "FAN-OUT": {
+      "transactions": 143,
+      "A model, no graph": 0.699,
+      "B model, + graph": 0.916
+    },
+    "GATHER-SCATTER": {
+      "transactions": 404,
+      "A model, no graph": 0.639,
+      "B model, + graph": 0.908
+    },
+    "RANDOM": {
+      "transactions": 88,
+      "A model, no graph": 0.591,
+      "B model, + graph": 0.705
+    },
+    "SCATTER-GATHER": {
+      "transactions": 256,
+      "A model, no graph": 0.59,
+      "B model, + graph": 0.816
+    },
+    "STACK": {
+      "transactions": 143,
+      "A model, no graph": 0.678,
+      "B model, + graph": 0.769
+    }
+  }
+}
