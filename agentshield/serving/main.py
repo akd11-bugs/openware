@@ -7,6 +7,7 @@ Environment:
   AGENTSHIELD_TRUST_CLIENT_TS=1  benchmark/replay only: use the client's timestamp for feature state
 Agent trust (all optional; with none of them set, signed agent requests are challenged, never trusted):
   AGENTSHIELD_AGENT_DIRECTORY=1      fetch keys from the key directory named in Signature-Agent (https, public hosts only)
+  AGENTSHIELD_REQUIRE_SIGNED_DIRECTORY=1  only trust directory keys that signed the directory response themselves
   AGENTSHIELD_VISA_REGISTRY_DB       path to a registry file shaped like Visa's sample (read only)
   AGENTSHIELD_AGENT_POLICY           JSON: {"authorities": [...], "paths": [...], "tag_routes": {"tag": ["/route"]}}
   AGENTSHIELD_REDIS_URL              keep replay protection (nonces) in Redis; needs the redis package
@@ -68,7 +69,7 @@ def build(env=None, redis_from_url=None):
     if env.get("AGENTSHIELD_VISA_REGISTRY_DB"):
         registry, _report = load_visa_registry(env["AGENTSHIELD_VISA_REGISTRY_DB"])
     if env.get("AGENTSHIELD_AGENT_DIRECTORY") == "1":
-        directory = KeyDirectoryFetcher()
+        directory = KeyDirectoryFetcher(require_signed=env.get("AGENTSHIELD_REQUIRE_SIGNED_DIRECTORY") == "1")
     verifier = None
     if env.get("AGENTSHIELD_VISA_REGISTRY_DB") or directory is not None:
         verifier = Verifier(registry, _nonce_store(env, redis_from_url), Policy(), directory=directory)

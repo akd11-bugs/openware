@@ -22,6 +22,8 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from .directory_signature import verify_directory_signatures  # noqa: E402
+
 MAX_BYTES, MAX_KEYS, TIMEOUT, NEG_TTL, POS_TTL = 65_536, 20, 3.0, 300, 300
 ALLOWED_TYPES = {"application/http-message-signatures-directory+json", "application/jwk-set+json"}
 
@@ -135,16 +137,18 @@ def default_http_get(ip: str, host: str, path: str, timeout: float, max_bytes: i
                 if size > max_bytes:
                     raise DirectoryError("response too large")
                 chunks.append(chunk)
-            return r.status_code, r.headers.get("content-type", ""), b"".join(chunks)
+            wanted = ("content-digest", "signature", "signature-input")
+            return r.status_code, r.headers.get("content-type", ""), b"".join(chunks), {k: r.headers[k] for k in wanted if k in r.headers}
 
 
 class KeyDirectoryFetcher:
     def __init__(self, resolve=default_resolve, http_get=default_http_get, clock=time.time, timeout: float = TIMEOUT,
                  max_bytes: int = MAX_BYTES, max_keys: int = MAX_KEYS, pos_ttl: int = POS_TTL, neg_ttl: int = NEG_TTL,
-                 max_cache: int = 1000) -> None:
+                 max_cache: int = 1000, require_signed: bool = False) -> None:
         self._resolve, self._http_get, self._clock = resolve, http_get, clock
         self.timeout, self.max_bytes, self.max_keys = timeout, max_bytes, max_keys
         self.pos_ttl, self.neg_ttl, self.max_cache = pos_ttl, neg_ttl, max_cache
+        self.require_signed = require_signed  # only keep keys that signed the directory response themselves
         self._cache: OrderedDict = OrderedDict()  # url -> (expires_at, keys or None)
 
     def keys(self, url: str) -> dict:
@@ -156,7 +160,9 @@ class KeyDirectoryFetcher:
             return hit[1]
         try:
             host, ip, path = check_url(url, self._resolve)
-            status, ctype, body = self._http_get(ip, host, path, self.timeout, self.max_bytes)
+            result = self._http_get(ip, host, path, self.timeout, self.max_bytes)
+            status, ctype, body = result[:3]
+            resp_headers = result[3] if len(result) > 3 else {}
             if status != 200:  # redirects and everything else are failures; we never follow them
                 raise DirectoryError(f"status {status}")
             if ctype.split(";")[0].strip().lower() not in ALLOWED_TYPES:
@@ -164,6 +170,11 @@ class KeyDirectoryFetcher:
             if len(body) > self.max_bytes:
                 raise DirectoryError("response too large")
             keys = parse_directory(body, now, self.max_keys)
+            if self.require_signed:
+                signed = verify_directory_signatures(resp_headers, body, host, keys, now)
+                keys = {k: v for k, v in keys.items() if k in signed}
+                if not keys:
+                    raise DirectoryError("directory is not signed by its own keys")
         except DirectoryError:
             self._store(url, now + self.neg_ttl, None)
             raise

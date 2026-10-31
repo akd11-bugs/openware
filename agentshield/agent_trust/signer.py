@@ -28,6 +28,26 @@ def component_line(name: str, method: str, authority: str, path: str, query: str
     return f'"{name}": {value}'
 
 
+DIRECTORY_TAG = "http-message-signatures-directory"
+
+
+def sign_directory_response(private_key, keyid, *, authority, body, now, lifetime=3600, tag=DIRECTORY_TAG, label="sig1", alg=None,
+                            components=("@authority;req", "content-digest")):
+    """Headers a key directory sends so clients can check the response was signed by one of its own keys."""
+    digest = content_digest(body)
+    is_rsa = isinstance(private_key, rsa.RSAPrivateKey)
+    alg = alg or ("rsa-pss-sha256" if is_rsa else "ed25519")
+    inner = " ".join('"@authority";req' if c == "@authority;req" else f'"{c}"' for c in components)
+    params = f'({inner});created={now};expires={now + lifetime};keyid="{keyid}";alg="{alg}";tag="{tag}"'
+    lines = [f'"@authority";req: {authority}' if c == "@authority;req" else f'"content-digest": {digest}' for c in components]
+    base = "\n".join(lines + [f'"@signature-params": {params}'])
+    if is_rsa:
+        raw = private_key.sign(base.encode(), padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=hashes.SHA256.digest_size), hashes.SHA256())
+    else:
+        raw = private_key.sign(base.encode())
+    return {"content-digest": digest, "signature-input": f"{label}={params}", "signature": f"{label}=:{base64.b64encode(raw).decode()}:"}
+
+
 def sign_request(private_key, keyid, *, method, authority, path, tag, now, lifetime=300, nonce=None,
                  covered=DEFAULT_COVERED, alg=None, query="", omit=(), rsa_salt="hash", body=None, cover_body=True,
                  signature_agent=None, cover_agent=True):

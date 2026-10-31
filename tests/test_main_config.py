@@ -104,3 +104,9 @@ def test_a_missing_redis_library_is_a_clear_error(model, monkeypatch):
     monkeypatch.setitem(sys.modules, "redis", None)  # makes `import redis` fail
     with pytest.raises(RuntimeError, match="redis"):
         build(model, AGENTSHIELD_AGENT_DIRECTORY="1", AGENTSHIELD_REDIS_URL="redis://example:6379/0")
+
+
+def test_signed_directories_can_be_required(model):
+    app = build(model, AGENTSHIELD_AGENT_DIRECTORY="1", AGENTSHIELD_REQUIRE_SIGNED_DIRECTORY="1")
+    assert app.state.verifier.directory.require_signed is True
+    assert build(model, AGENTSHIELD_AGENT_DIRECTORY="1").state.verifier.directory.require_signed is False  # off unless asked
