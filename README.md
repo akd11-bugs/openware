@@ -10,10 +10,10 @@ A risk API for fintechs. One call checks a payment for fraud, flags unusual beha
 | Fraud model for the API (23 portable fields) | AUC 0.788, catches 11.8% at 1% false alarms | Only uses fields any feed can supply |
 | Mule detection, account graph features | PaySim: AUC 0.971, catches 75.2% at 1% false alarms (without graph features 0.944 and 50.5%). IBM AML: AUC 0.982 and 73.9% (without 0.946 and 50.4%) | Both datasets are synthetic. Gains are largest for fan-in, fan-out and gather-scatter rings and small for cycles |
 | Anomaly detector, rapid repeats | Fraud is 2.2x more common in flagged rows | Real card data, flags 6% of traffic, so it is noisy |
-| Agent verification | 43 attack tests pass, about 43 microseconds per check | Forged, replayed, expired and other attacks |
+| Agent verification | 132 tests pass, about 43 microseconds per Ed25519 check and 19 per RSA-PSS check | Forged, replayed, expired and body-swapped requests. Checked against the shape of Visa's public sample, not a live agent |
 | API over local HTTP | p50 0.8 ms, p99 1.4 ms, about 1,200 requests per second | Excludes a network hop and a real Redis lookup |
 
-The Kaggle winner scored 0.9459 on a hidden test set. Ours is a different test, so the two numbers are not comparable. 215 tests pass, and they pass on a fresh clone with no data.
+The Kaggle winner scored 0.9459 on a hidden test set. Ours is a different test, so the two numbers are not comparable. 314 tests pass, and they pass on a fresh clone with no data.
 
 ## How we got there
 
@@ -34,6 +34,7 @@ The Kaggle winner scored 0.9459 on a hidden test set. Ours is a different test, 
 - The first API version shared state across tenants and trusted client timestamps. Both are fixed.
 - Validation looked better than the test period by 0.025 AUC, because we tuned on it.
 - Agent loops sometimes stopped early or kept running after we stopped them, so long searches now run as plain scripts.
+- Visa's public sample differs from the standard in small ways (a camel-case key id, no method signed). Our strict verifier rejected it out of the box, so each difference is now an explicit setting.
 
 ## What we can still do
 
@@ -41,7 +42,7 @@ The Kaggle winner scored 0.9459 on a hidden test set. Ours is a different test, 
 - Use richer fields such as payee history, device IDs and KYC status.
 - Test mule detection on real bank data with labelled mule accounts, and build the online version of the graph features.
 - Move the feature and nonce state to Redis, and add Kafka.
-- Add rate limits, and bind agent checks to a tenant and a domain.
+- Add rate limits at a proxy, and run the verifier against a live Visa sample agent.
 - Try Isolation Forest next to the rule detectors.
 - Get a proper data protection review before touching customer data.
 

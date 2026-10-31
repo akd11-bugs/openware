@@ -2,6 +2,11 @@
 
 The big changes and why we made them. Small fixes are in git history. Newest first.
 
+## 2026-11-01
+
+- **Agent verifier finished in five rounds.** RSA-PSS next to Ed25519 with the algorithm pinned to the key record. Signed request bodies through content-digest. A key directory fetcher that refuses private addresses, follows no redirects, caps size and key count, and caches failures for five minutes, with keys looked up by directory and thumbprint. Per-tenant agent policy in the API: pinned domains and paths, a tag to route map, no trust without a signed request. An interoperability test built on the shape of Visa's public sample. 132 tests now cover the verifier.
+- **Differences from Visa's sample are explicit choices.** The sample uses `keyId`, signs only authority and path, and accepts the query string inside the path. We stay strict by default and offer a `visa_compat` setting, and a tenant can relax the required components. Spaces after semicolons are now accepted because the standard allows them.
+
 ## 2026-10-31
 
 - **Review fixes.** Three independent reviews (code, security, tests) found real problems, and the cheap ones are fixed. Tests no longer fail on a fresh clone, and there is a CI job. Missing receivers and accounts are no longer pooled into one fake account. The API validates tenant budgets at startup, never lets a late event rewrite history, flags bursts inside one second, and survives an audit write failure. The pickle cache is hash checked. The auto-search code check is stricter and its child process no longer inherits API keys. Still open: a real sandbox for model-written code, same-second bursts in the model features, and a shared constants module.

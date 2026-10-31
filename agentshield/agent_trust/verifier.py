@@ -26,7 +26,7 @@ ALLOWED_COMPONENTS = {"@method", "@authority", "@path", "@query", "content-diges
 SUPPORTED_ALGS = {"ed25519", "rsa-pss-sha256"}
 MIN_RSA_BITS = 2048
 MANDATORY_PARAMS = ("created", "expires", "nonce", "keyid", "alg", "tag")
-_INPUT = re.compile(r'^([a-z][a-z0-9_-]{0,15})=\(((?:"[@a-z0-9_-]+"(?: "[@a-z0-9_-]+")*)?)\)((?:;[a-z]+=(?:\d{1,12}|"[A-Za-z0-9._~-]{1,64}"))*)\Z')
+_INPUT = re.compile(r'^([a-z][a-z0-9_-]{0,15})=\(((?:"[@a-z0-9_-]+"(?: "[@a-z0-9_-]+")*)?)\)((?:; *[A-Za-z]+=(?:\d{1,12}|"[A-Za-z0-9._~-]{1,64}"))*)\Z')
 _SIG = re.compile(r"^([a-z][a-z0-9_-]{0,15})=:([A-Za-z0-9+/]+={0,2}):\Z")
 _SIGAGENT = re.compile(r'^(?:[a-z][a-z0-9_-]{0,15}=)?"(https://[^"\s]{1,2000})"\Z')
 _DIGEST = re.compile(r"^sha-256=:([A-Za-z0-9+/]{43}=):\Z")
@@ -58,6 +58,9 @@ class Policy:
     skew: int = 30
     tag_routes: dict = field(default_factory=dict)  # tag -> allowed route prefixes; empty = tags not route-bound
     public_prefixes: tuple = ()  # everything else is default-deny
+    # Visa's public sample calls the key id `keyId` (RFC 9421 spells it keyid). Off by default; a tenant that must
+    # accept that sample turns it on. Required components are a separate choice: the sample signs authority and path only.
+    visa_compat: bool = False
 
 
 @dataclass
@@ -98,14 +101,16 @@ class KeyRegistry:
                 raise ValueError("ed25519 public key must be 32 raw bytes")
             loaded = Ed25519PublicKey.from_public_bytes(public_key)
         elif alg == "rsa-pss-sha256":
-            try:
-                loaded = serialization.load_der_public_key(public_key)
+            try:  # PEM (as Visa's sample registry stores it) or DER
+                pem = public_key.lstrip().startswith(b"-----BEGIN")
+                loaded = serialization.load_pem_public_key(public_key) if pem else serialization.load_der_public_key(public_key)
             except Exception as e:  # noqa: BLE001
-                raise ValueError("invalid RSA public key (expected DER SubjectPublicKeyInfo)") from e
+                raise ValueError("invalid RSA public key (expected PEM or DER SubjectPublicKeyInfo)") from e
             if not isinstance(loaded, rsa.RSAPublicKey):
                 raise ValueError("not an RSA public key")
             if loaded.key_size < MIN_RSA_BITS:
                 raise ValueError(f"RSA keys must be at least {MIN_RSA_BITS} bits")
+            public_key = loaded.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
         else:
             raise ValueError(f"unsupported algorithm {alg}")
         self._keys[keyid] = KeyRecord(agent_id, keyid, alg, public_key, loaded=loaded)
@@ -193,7 +198,9 @@ class Verifier:
         covered = re.findall(r'"([^"]+)"', m_in.group(2))
         params: dict = {}
         for item in filter(None, m_in.group(3).split(";")):
-            k, v = item.split("=", 1)
+            k, v = item.strip().split("=", 1)
+            if pol.visa_compat and k == "keyId":
+                k = "keyid"
             if k in params:
                 return Result("invalid", "malformed_signature")
             params[k] = int(v) if v.isdigit() else v.strip('"')

@@ -13,7 +13,7 @@ A working prototype on public data. Nothing here is Indian traffic. Test numbers
 | Transaction fraud, all card fields (IEEE-CIS, real cards) | AUC 0.903, catches 41.7% of fraud at 1% false alarms. Rules only: 0.730 and 8.0% | Solid on real card data. The Kaggle winner scored 0.9459 on a hidden test, which is a different test |
 | Transaction fraud, portable fields only | AUC 0.788, catches 11.8% at 1% false alarms | What an API can rely on from any feed. Weak, so it needs each customer's own data |
 | Mule detection, account graph features (PaySim and IBM AML, both synthetic) | PaySim: AUC 0.971 and 75.2% caught at 1% false alarms, against 0.944 and 50.5% without graph features (rules: 0.869 and 22.9%). IBM AML: AUC 0.982 and 73.9%, against 0.946 and 50.4% | Graph features add about 23 to 25 points of recall on both. On IBM AML the gain is about 22 to 27 points for fan-in, fan-out and gather-scatter rings, and only 7 to 11 for cycles and bipartite rings. At the strictest budget (0.1%) the graph model caught more on IBM AML (47.1% against 16.0%) and less on PaySim (26.4% against 40.1%) |
-| Agent verification | 43 attack tests pass, about 43 microseconds per check | Forged, replayed, expired and mis-scoped requests are blocked or challenged |
+| Agent verification | 132 tests pass. About 43 microseconds per Ed25519 check and 19 per RSA-PSS check, in process | Forged, replayed, expired, mis-scoped and body-swapped requests are blocked or challenged. Key directories are fetched with SSRF limits. Checked against the shape of Visa's public sample using hand-built headers, not a running Visa agent |
 | Anomaly detector, rapid repeats (IEEE-CIS) | Fraud is 2.2 times more common in flagged rows | Flags 6% of traffic, so it is noisy |
 | Scoring API over local HTTP | p50 0.8 ms, p99 1.4 ms | Leaves out a network hop and a real Redis lookup |
 
@@ -74,12 +74,16 @@ Human-vs-bot behavioural SDK, API-abuse guard, deepfake KYC, UPI Reserve Pay and
 5. Keys are looked up by (directory URL, keyid), the algorithm must match the key record, and agent and key status are checked together.
 6. Routes configured as agent-protected are default-deny.
 7. Standards-compliant header parsing; coarse reason codes to callers, detail only in the audit log.
+8. Both Ed25519 and RSA-PSS-SHA256 are supported, and the algorithm must match the one on the key's record, never the request's claim.
+9. A request with a body must sign a content-digest that matches the exact bytes received.
+10. Keys fetched from an agent's directory use https only, refuse private addresses, follow no redirects, are size and count capped, and are identified by thumbprint. Any failure means challenge, never allow.
+11. Agent trust is opt in per tenant: pinned domains and paths, a tag to route map, and no trust claim without a signed request.
 
 ## 7. Success metrics and acceptance criteria
 
 | Area | Metric | Target | Status |
 | --- | --- | --- | --- |
-| Verifier correctness | Forged, expired, replayed, altered-mandate vectors rejected | 100% of vectors, zero fail-open paths | Met on the prototype: 43 attack tests and a hostile review. Not yet tested against Visa's own sample agent |
+| Verifier correctness | Forged, expired, replayed, altered-mandate vectors rejected | 100% of vectors, zero fail-open paths | Met on the prototype: 132 tests covering attacks, key directory fetching and Visa-shaped requests. Not yet run against a live Visa sample agent |
 | Verifier robustness | Key-store or nonce-store outage | Never returns allow | Met in tests: an outage returns challenge |
 | Mule detection | Recall at a fixed false-positive rate vs a rules-only baseline | Beat rules and a plain model on a real labelled ring dataset | Beaten on PaySim (+25 points) and on IBM AML (+23 points) at 1% false alarms. Both are synthetic, so real bank data is still needed |
 | Generalisation | Same result direction across several datasets | Lift on every dataset; report the spread | Partly: IEEE-CIS (real), PaySim, two Indian-style sets. Labels in the Indian sets follow generator rules |
@@ -124,6 +128,7 @@ See [architecture.md](../architecture.md). Stack: Python 3.12, FastAPI, Redis, K
 | Mule detection needs real labelled data | Shadow mode on pilot data first |
 | Cross-customer sharing raises privacy and regulatory issues | Hashed IDs only, opt-in, DPDP review before launch |
 | Verifier bug lets attackers through | Test vectors first, hostile review subagent, security review, human diff review |
+| Visa's public sample differs from the standard (camel-case `keyId`, no `@method` signed, query string inside the path) | Strict by default, with each difference an explicit tenant setting. Not yet tested against a live sample agent |
 | Timeline: original guide assumed 12 weeks for the full MVP | Narrowed to two segments; realistic range 16-20 weeks including real protocol work |
 | Competitors add agent verification | Speed, depth on enforcement, shared network signals |
 
