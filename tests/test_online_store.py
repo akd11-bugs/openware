@@ -84,3 +84,13 @@ def test_state_is_capped_by_lru_and_empty_keys_are_dropped():
 def test_store_exposes_the_device_and_instrument_features():
     new = ["device_new_for_sender", "sender_distinct_devices", "device_uniq_senders", "channel_code", "instrument_code", "network_code"]
     assert set(new) <= set(FEATURE_NAMES)
+
+
+def test_parity_holds_when_some_receivers_are_missing():
+    df = make(1200, seed=5)
+    rng = np.random.default_rng(9)
+    df.loc[rng.random(len(df)) < 0.2, "receiver_id"] = None
+    online, want = replay(df), batch(df)
+    for c in FEATURE_NAMES:
+        np.testing.assert_allclose(online[c].to_numpy(dtype=float), want[c].to_numpy(dtype=float),
+                                   rtol=1e-9, atol=1e-9, equal_nan=True, err_msg=c)

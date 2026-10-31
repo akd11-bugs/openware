@@ -44,7 +44,10 @@ def client(model_dir, tmp_path):
     reg = KeyRegistry()
     reg.register("agent-1", "k1", "ed25519", public_bytes(keys["k1"]))
     ver = Verifier(reg, InMemoryNonceStore(), Policy(), clock=lambda: NOW)
-    tenants = TenantRegistry([Tenant("t1", hash_key(KEY)), Tenant("t2", hash_key("other-key"), challenge_fpr=0.01, block_fpr=0.001)])
+    tenants = TenantRegistry([
+        Tenant("t1", hash_key(KEY), agent_authorities=("shop.in",), agent_path_prefixes=("/product", "/checkout"),
+               agent_tag_routes=(("agent-browser-auth", ("/product",)), ("agent-payer-auth", ("/checkout",)))),
+        Tenant("t2", hash_key("other-key"), challenge_fpr=0.01, block_fpr=0.001)])
     app = create_app(model_dir, tenants, ver, audit_path=tmp_path / "audit.jsonl", audit_salt="test-salt", clock=lambda: NOW,
                      trust_client_ts=True)
     c = TestClient(app)
@@ -234,3 +237,151 @@ def test_instrument_fields_are_accepted_and_validated(client):
     ok = {**txn(1, amount=1000), "channel": "W", "instrument_type": "debit", "network": "visa", "device_id": "Pixel 7 Build/TQ3A"}
     assert post(client, ok).status_code == 200
     assert post(client, {**txn(2), "device_id": "bad;id<script>"}).status_code == 422
+
+
+def test_startup_fails_if_a_tenant_budget_has_no_calibrated_threshold(model_dir):
+    bad = TenantRegistry([Tenant("odd", hash_key(KEY), challenge_fpr=0.07, block_fpr=0.005)])
+    with pytest.raises(RuntimeError, match="odd"):
+        create_app(model_dir, bad)
+
+
+def test_out_of_order_timestamps_cannot_corrupt_history(client):
+    post(client, {**txn(1, amount=1000), "timestamp": NOW + 100})
+    post(client, {**txn(2, amount=1000), "timestamp": NOW + 50})  # arrives late; recorded no earlier than the last event
+    f = client.app.state.store_for("t1").features("c1", None, NOW + 200, 1000)
+    assert f["sender_since_last"] == 100 and f["sender_prior_cnt"] == 2
+
+
+def test_audit_write_failure_does_not_turn_a_decision_into_an_error(model_dir, tmp_path):
+    tenants = TenantRegistry([Tenant("t1", hash_key(KEY))])
+    c = TestClient(create_app(model_dir, tenants, audit_path=tmp_path / "missing_dir" / "audit.jsonl", audit_salt="s",
+                              clock=lambda: NOW, trust_client_ts=True))
+    r = post(c, txn(1, amount=1000))
+    assert r.status_code == 200 and r.json()["action"] in ("allow", "challenge", "block")
+
+
+def test_burst_inside_one_second_is_still_flagged(client):
+    out = [post(client, {**txn(i, amount=1000), "timestamp": NOW}).json() for i in range(1, 13)]
+    assert any("ONLINE_BURST_1H" in o["anomaly_flags"] for o in out)
+
+
+def signed_post(client, body: bytes, **kw):
+    h = sign_request(client.keys["k1"], "k1", method="POST", authority="shop.in", path="/checkout/pay",
+                     tag="agent-payer-auth", now=NOW, body=body, **kw)
+    return {"method": "POST", "authority": "shop.in", "path": "/checkout/pay", "query": "", "headers": h}
+
+
+def test_agent_request_body_is_bound_to_the_signature(client):
+    import base64
+    good = b'{"amount": 500}'
+    ok = post(client, txn(1, amount=1000, agent_request={**signed_post(client, good), "body_b64": base64.b64encode(good).decode()})).json()
+    assert ok["agent"]["outcome"] == "verified"
+    swapped = post(client, txn(2, amount=1000, agent_request={**signed_post(client, good), "body_b64": base64.b64encode(b'{"amount": 99999}').decode()})).json()
+    assert swapped["action"] == "block" and swapped["agent"]["reason"] == "digest_mismatch"
+
+
+def test_invalid_base64_body_is_rejected(client):
+    ar = {**signed_post(client, b"x"), "body_b64": "not base64 !!!"}
+    assert post(client, txn(3, amount=1000, agent_request=ar)).status_code == 422
+
+
+# ---- per-tenant agent policy ----
+def agent_req(client, authority="shop.in", path="/product/1", tag="agent-browser-auth", method="GET"):
+    h = sign_request(client.keys["k1"], "k1", method=method, authority=authority, path=path, tag=tag, now=NOW)
+    return {"method": method, "authority": authority, "path": path, "query": "", "headers": h}
+
+
+def test_an_agent_signed_for_a_domain_the_tenant_did_not_pin_is_blocked(client):
+    r = post(client, txn(1, amount=1000, agent_request=agent_req(client, authority="evil.example"))).json()
+    assert r["action"] == "block" and r["agent"]["reason"] == "authority_not_allowed"
+
+
+def test_an_agent_acting_outside_the_pinned_paths_is_blocked(client):
+    r = post(client, txn(1, amount=1000, agent_request=agent_req(client, path="/admin/users"))).json()
+    assert r["action"] == "block" and r["agent"]["reason"] == "path_not_allowed"
+
+
+def test_the_tenants_tag_to_route_map_stops_a_browsing_tag_on_a_payment_route(client):
+    r = post(client, txn(1, amount=1000, agent_request=agent_req(client, path="/checkout/pay", tag="agent-browser-auth"))).json()
+    assert r["action"] == "block" and r["agent"]["reason"] == "tag_route_mismatch"
+    ok = post(client, txn(2, amount=1000, agent_request=agent_req(client, path="/checkout/pay", tag="agent-payer-auth"))).json()
+    assert ok["agent"]["outcome"] == "verified" and ok["action"] == "allow"
+
+
+def test_a_tenant_with_no_agent_policy_does_not_trust_agent_signatures(client):
+    r = post(client, txn(1, amount=1000, agent_request=agent_req(client)), key="other-key").json()
+    assert r["action"] == "challenge" and r["agent"]["reason"] == "agent_policy_not_configured"
+
+
+def test_an_actor_who_says_agent_but_proves_nothing_is_challenged(client):
+    r = post(client, {**txn(1, amount=1000), "actor": "agent"}).json()
+    assert r["action"] == "challenge" and r["agent"]["reason"] == "agent_not_proven"
+    assert r["reasons"][0]["code"] == "AGENT_NOT_PROVEN"  # not AGENT_AGENT_NOT_PROVEN
+
+
+def test_no_agent_claim_is_made_when_nothing_is_declared(client):
+    r = post(client, txn(1, amount=1000)).json()
+    assert r["agent"] is None and r["action"] == "allow"
+    h = post(client, {**txn(2, amount=1000), "actor": "human"}).json()
+    assert h["agent"] is None and h["action"] == "allow"
+
+
+def test_actor_is_validated(client):
+    assert post(client, {**txn(1), "actor": "robot"}).status_code == 422
+
+
+def test_tenant_agent_settings_are_validated():
+    with pytest.raises(ValueError):
+        Tenant("x", "h", agent_authorities=("",))
+    with pytest.raises(ValueError):
+        Tenant("x", "h", agent_authorities=("Shop.IN",))  # authorities are compared as given, so they must be lower case
+    with pytest.raises(ValueError):
+        Tenant("x", "h", agent_path_prefixes=("product",))  # must start with a slash
+
+
+# ---- warm start ----
+from agentshield.serving.app import WarmEvent  # noqa: E402
+
+
+def warm_events(n=6, customer="c9", start=NOW - 3 * 86400, step=3600, amount=1000):
+    return [WarmEvent(customer_id=customer, amount_minor=amount, timestamp=start + i * step) for i in range(n)]
+
+
+def test_warming_gives_a_new_request_its_customers_history(client):
+    assert client.app.state.warm("t1", warm_events()) == 6
+    f = client.app.state.store_for("t1").features("c9", None, NOW, 1000)
+    assert f["sender_prior_cnt"] == 6 and f["card_cnt_604800s"] == 6
+    r = post(client, {**txn(1, amount=1000), "customer_id": "c9"}).json()
+    assert r["action"] == "allow"
+
+
+def test_warm_events_can_arrive_in_any_order(client):
+    ev = warm_events()
+    client.app.state.warm("t1", list(reversed(ev)))
+    f = client.app.state.store_for("t1").features("c9", None, NOW, 1000)
+    assert f["sender_prior_cnt"] == 6 and f["sender_since_last"] == NOW - ev[-1].timestamp
+
+
+def test_warming_one_tenant_does_not_touch_another(client):
+    client.app.state.warm("t1", warm_events())
+    assert client.app.state.store_for("t2").features("c9", None, NOW, 1000)["sender_prior_cnt"] == 0
+
+
+def test_a_warmed_history_makes_a_later_spike_visible(client):
+    client.app.state.warm("t1", warm_events(n=8, amount=1000))
+    r = post(client, {**txn(1, amount=50_000), "customer_id": "c9"}).json()
+    assert "ONLINE_AMOUNT_SPIKE" in r["anomaly_flags"]
+
+
+def test_late_events_after_a_warm_start_cannot_rewrite_history(client):
+    ev = warm_events(n=3, start=NOW - 100, step=10)  # the newest warmed event is NOW - 80
+    client.app.state.warm("t1", ev)
+    post(client, {**txn(1, amount=1000), "customer_id": "c9", "timestamp": NOW - 5000})  # claims to be older than the history
+    f = client.app.state.store_for("t1").features("c9", None, NOW + 10, 1000)
+    assert f["sender_prior_cnt"] == 4 and f["sender_since_last"] <= 100
+
+
+def test_warm_events_are_validated():
+    for bad in ({"amount_minor": -1}, {"customer_id": "bad id;"}, {"timestamp": -5}):
+        with pytest.raises(Exception):
+            WarmEvent(**{"customer_id": "c1", "amount_minor": 1, "timestamp": 1, **bad})

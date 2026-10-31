@@ -7,20 +7,29 @@ Three outcomes, never allow on failure:
 Pure deterministic code: no ML, no network. Closes the gaps found in docs/research/visa-tap-and-web-bot-auth-review.md.
 """
 import base64
+import hashlib
+import hmac
 import re
 import threading
 import time
 from dataclasses import dataclass, field
 
 from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from .directory import DirectoryError
 from .signer import component_line
 
-ALLOWED_COMPONENTS = {"@method", "@authority", "@path", "@query"}
+ALLOWED_COMPONENTS = {"@method", "@authority", "@path", "@query", "content-digest", "signature-agent"}
+SUPPORTED_ALGS = {"ed25519", "rsa-pss-sha256"}
+MIN_RSA_BITS = 2048
 MANDATORY_PARAMS = ("created", "expires", "nonce", "keyid", "alg", "tag")
-_INPUT = re.compile(r'^([a-z][a-z0-9_-]{0,15})=\(((?:"[@a-z0-9_-]+"(?: "[@a-z0-9_-]+")*)?)\)((?:;[a-z]+=(?:\d{1,12}|"[A-Za-z0-9._~-]{1,64}"))*)\Z')
+_INPUT = re.compile(r'^([a-z][a-z0-9_-]{0,15})=\(((?:"[@a-z0-9_-]+"(?: "[@a-z0-9_-]+")*)?)\)((?:; *[A-Za-z]+=(?:\d{1,12}|"[A-Za-z0-9._~-]{1,64}"))*)\Z')
 _SIG = re.compile(r"^([a-z][a-z0-9_-]{0,15})=:([A-Za-z0-9+/]+={0,2}):\Z")
+_SIGAGENT = re.compile(r'^(?:[a-z][a-z0-9_-]{0,15}=)?"(https://[^"\s]{1,2000})"\Z')
+_DIGEST = re.compile(r"^sha-256=:([A-Za-z0-9+/]{43}=):\Z")
 _NONCE = re.compile(r"^[A-Za-z0-9._~-]{8,64}\Z")
 
 
@@ -39,6 +48,7 @@ class Request:
     path: str  # without query string
     headers: dict
     query: str = ""
+    body: bytes | None = None  # the exact bytes received; a non-empty body must be covered by a content-digest
 
 
 @dataclass
@@ -48,6 +58,9 @@ class Policy:
     skew: int = 30
     tag_routes: dict = field(default_factory=dict)  # tag -> allowed route prefixes; empty = tags not route-bound
     public_prefixes: tuple = ()  # everything else is default-deny
+    # Visa's public sample calls the key id `keyId` (RFC 9421 spells it keyid). Off by default; a tenant that must
+    # accept that sample turns it on. Required components are a separate choice: the sample signs authority and path only.
+    visa_compat: bool = False
 
 
 @dataclass
@@ -69,6 +82,7 @@ class KeyRecord:
     alg: str
     public_key: bytes
     active: bool = True
+    loaded: object = None  # the parsed public key, checked once at registration
 
 
 class KeyRegistry:
@@ -82,9 +96,24 @@ class KeyRegistry:
     def register(self, agent_id: str, keyid: str, alg: str, public_key: bytes) -> None:
         if keyid in self._keys:
             raise ValueError("key id already registered")
-        if alg != "ed25519" or len(public_key) != 32:
-            raise ValueError("ed25519 public key must be 32 raw bytes")
-        self._keys[keyid] = KeyRecord(agent_id, keyid, alg, public_key)
+        if alg == "ed25519":
+            if len(public_key) != 32:
+                raise ValueError("ed25519 public key must be 32 raw bytes")
+            loaded = Ed25519PublicKey.from_public_bytes(public_key)
+        elif alg == "rsa-pss-sha256":
+            try:  # PEM (as Visa's sample registry stores it) or DER
+                pem = public_key.lstrip().startswith(b"-----BEGIN")
+                loaded = serialization.load_pem_public_key(public_key) if pem else serialization.load_der_public_key(public_key)
+            except Exception as e:  # noqa: BLE001
+                raise ValueError("invalid RSA public key (expected PEM or DER SubjectPublicKeyInfo)") from e
+            if not isinstance(loaded, rsa.RSAPublicKey):
+                raise ValueError("not an RSA public key")
+            if loaded.key_size < MIN_RSA_BITS:
+                raise ValueError(f"RSA keys must be at least {MIN_RSA_BITS} bits")
+            public_key = loaded.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+        else:
+            raise ValueError(f"unsupported algorithm {alg}")
+        self._keys[keyid] = KeyRecord(agent_id, keyid, alg, public_key, loaded=loaded)
         self._agents_active.setdefault(agent_id, True)
 
     def revoke_key(self, keyid: str) -> None:
@@ -138,21 +167,23 @@ class InMemoryNonceStore:
 
 
 class Verifier:
-    def __init__(self, registry: KeyRegistry, nonces: InMemoryNonceStore, policy: Policy | None = None, clock=time.time):
+    def __init__(self, registry: KeyRegistry, nonces: InMemoryNonceStore, policy: Policy | None = None, clock=time.time,
+                 directory=None):
         self.registry, self.nonces, self.policy, self.clock = registry, nonces, policy or Policy(), clock
+        self.directory = directory  # a KeyDirectoryFetcher; when set, requests carrying Signature-Agent use it
 
-    def verify(self, req: Request) -> Result:
+    def verify(self, req: Request, policy: Policy | None = None) -> Result:
+        """`policy` overrides the default for this call only (the serving API passes each tenant's own)."""
         try:
-            return self._verify(req)
-        except KeyDirectoryUnavailable:
+            return self._verify(req, policy or self.policy)
+        except (KeyDirectoryUnavailable, DirectoryError):
             return Result("unverified", "key_directory_unavailable", tier="unknown")
         except StoreUnavailable:
             return Result("unverified", "nonce_store_unavailable", tier="unknown")
         except Exception:  # noqa: BLE001 - any unexpected error blocks; never allow
             return Result("invalid", "internal_error")
 
-    def _verify(self, req: Request) -> Result:
-        pol = self.policy
+    def _verify(self, req: Request, pol: Policy) -> Result:
         if any(req.path.startswith(p) for p in pol.public_prefixes):
             return Result("not_required", "public_route")
         h = {k.lower(): v for k, v in req.headers.items()}
@@ -167,14 +198,16 @@ class Verifier:
         covered = re.findall(r'"([^"]+)"', m_in.group(2))
         params: dict = {}
         for item in filter(None, m_in.group(3).split(";")):
-            k, v = item.split("=", 1)
+            k, v = item.strip().split("=", 1)
+            if pol.visa_compat and k == "keyId":
+                k = "keyid"
             if k in params:
                 return Result("invalid", "malformed_signature")
             params[k] = int(v) if v.isdigit() else v.strip('"')
         for name in MANDATORY_PARAMS:
             if name not in params:
                 return Result("invalid", f"missing_param:{name}")
-        if params["alg"] != "ed25519":
+        if params["alg"] not in SUPPORTED_ALGS:
             return Result("invalid", "unsupported_alg")
         if not isinstance(params["created"], int) or not isinstance(params["expires"], int) or not _NONCE.match(str(params["nonce"])):
             return Result("invalid", "malformed_signature")
@@ -182,6 +215,24 @@ class Verifier:
             return Result("invalid", "unknown_component")
         if not set(pol.required_components) <= set(covered):
             return Result("invalid", "components_missing")
+        if req.body and "content-digest" not in covered:
+            return Result("invalid", "body_not_covered")  # a body the signature does not bind could be swapped
+        agent_url = None
+        if self.directory is not None and "signature-agent" in h:
+            m_sa = _SIGAGENT.match(h["signature-agent"])
+            if not m_sa:
+                return Result("invalid", "bad_signature_agent")
+            if "signature-agent" not in covered:
+                return Result("invalid", "signature_agent_not_covered")  # otherwise a swapped directory would go unnoticed
+            agent_url = m_sa.group(1)
+        digest_header = h.get("content-digest", "")
+        if "content-digest" in covered:
+            m_d = _DIGEST.match(digest_header)
+            if not m_d:
+                return Result("invalid", "bad_content_digest")
+            actual = hashlib.sha256(req.body or b"").digest()
+            if not hmac.compare_digest(base64.b64decode(m_d.group(1)), actual):
+                return Result("invalid", "digest_mismatch")
         if pol.tag_routes:
             prefixes = pol.tag_routes.get(params["tag"])
             if prefixes is None:
@@ -197,17 +248,26 @@ class Verifier:
             return Result("invalid", "lifetime_too_long")
         if now > params["expires"]:
             return Result("invalid", "expired")
-        rec = self.registry.get(params["keyid"])
+        if agent_url is not None:  # keys are looked up by (directory, thumbprint), never by a bare key id
+            entry = self.directory.keys(agent_url).get(params["keyid"])
+            rec = KeyRecord(agent_url, params["keyid"], entry[0], entry[2], loaded=entry[1]) if entry else None
+        else:
+            rec = self.registry.get(params["keyid"])
         if rec is None:
             return Result("unverified", "unknown_key", tier="unknown")
         if not rec.active:
             return Result("invalid", "key_revoked", rec.agent_id)
         if rec.alg != params["alg"]:
             return Result("invalid", "alg_mismatch", rec.agent_id)
-        base = "\n".join([component_line(c, req.method, req.authority, req.path, req.query.lstrip("?")) for c in covered]
+        base = "\n".join([component_line(c, req.method, req.authority, req.path, req.query.lstrip("?"), digest_header, h.get("signature-agent", "")) for c in covered]
                          + [f'"@signature-params": {sig_in.split("=", 1)[1]}'])
         try:
-            Ed25519PublicKey.from_public_bytes(rec.public_key).verify(base64.b64decode(m_sig.group(2)), base.encode())
+            sig_bytes = base64.b64decode(m_sig.group(2))
+            if rec.alg == "ed25519":
+                rec.loaded.verify(sig_bytes, base.encode())
+            else:  # rsa-pss-sha256; the salt length is not pinned because signers differ (hash length or maximum)
+                rec.loaded.verify(sig_bytes, base.encode(), padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.AUTO),
+                                  hashes.SHA256())
         except (InvalidSignature, ValueError):
             return Result("invalid", "bad_signature", rec.agent_id)
         # Record the nonce only after the signature is valid, so a forger cannot burn a victim's nonce.

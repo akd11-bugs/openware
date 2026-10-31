@@ -76,6 +76,10 @@ class OnlineFeatureStore:
         self._dev_by_sender: OrderedDict = OrderedDict()
         self._senders_by_dev: OrderedDict = OrderedDict()
 
+    def same_ts_count(self, sender, ts: int) -> int:
+        """Earlier events by this sender in the same second. The strict windows ignore them, so bursts use this too."""
+        return len(self._by_sender.range(sender, ts, ts + 1))
+
     def features(self, sender, receiver, ts: int, amount_minor: int, device=None, channel=None, instrument=None,
                  network=None) -> dict:
         amts = self._by_sender.range(sender, ts - 30 * DAY, ts)

@@ -5,3 +5,9 @@ __pycache__/
 CLAUDE.local.md
 .claude/settings.local.json
 models/
+.env.*
+*.pkl
+*.pem
+*.key
+.DS_Store
+catboost_info/

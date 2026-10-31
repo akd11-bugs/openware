@@ -167,3 +167,12 @@ def test_device_group_is_causal(group):
         ch.loc[200:, c] = ch.loc[200:, c].to_numpy()[perm - 200]
     b = feats(ch, group)
     pd.testing.assert_frame_equal(a.iloc[:200], b.iloc[:200])
+
+
+def test_payee_risk_ignores_missing_receivers_instead_of_pooling_them():
+    rows = [("s1", "m1", 10 * H, 50), ("s2", None, 11 * H, 50), ("s3", None, 12 * H, 50), ("s4", "m1", 13 * H, 50)]
+    df = frame(rows)
+    f = feats(df, "payee_risk")
+    assert f.loc[[1, 2]].isna().all().all()  # no receiver, no payee features
+    clean = feats(frame([r for r in rows if r[1] is not None]), "payee_risk")
+    assert f.loc[[0, 3]].reset_index(drop=True).equals(clean.reset_index(drop=True))  # missing rows are not events for anyone

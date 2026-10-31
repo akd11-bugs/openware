@@ -11,9 +11,12 @@ Design points (from the security review):
 - SINGLE PROCESS ONLY: state (online store, nonce store, results) lives in memory. Several workers would let a
   signed request be replayed once per worker. A shared store (Redis) removes this limit.
 """
+import base64
+import binascii
 import hashlib
 import hmac
 import json
+import logging
 import threading
 import time
 from collections import OrderedDict, deque
@@ -29,6 +32,7 @@ from agentshield.features_online.store import ALL_FEATURE_NAMES, OnlineFeatureSt
 from .model import ModelBundle
 from .tenants import Tenant, TenantRegistry
 
+log = logging.getLogger("agentshield.serving")
 ID = r"^[A-Za-z0-9._:@-]+$"
 SEVERITY = {"allow": 0, "challenge": 1, "block": 2}
 STATELESS = {"amount_minor", "hour", "dow", "x_DeviceType", "amt_cents", "amt_whole", "amt_round"}
@@ -40,6 +44,17 @@ class AgentRequestIn(BaseModel):
     path: str = Field(max_length=1024)
     query: str = Field(default="", max_length=2048)
     headers: dict[str, str]
+    body_b64: str | None = Field(default=None, max_length=1_400_000)  # the agent's original request body, base64
+
+    @field_validator("body_b64")
+    @classmethod
+    def _valid_b64(cls, v):
+        if v is not None:
+            try:
+                base64.b64decode(v, validate=True)
+            except (binascii.Error, ValueError) as e:
+                raise ValueError("body_b64 is not valid base64") from e
+        return v
 
     @field_validator("headers")
     @classmethod
@@ -60,7 +75,17 @@ class AssessIn(BaseModel):
     channel: str | None = Field(default=None, max_length=32)
     instrument_type: str | None = Field(default=None, max_length=32)
     network: str | None = Field(default=None, max_length=32)
+    actor: str | None = Field(default=None, pattern=r"^(human|agent)$")  # who says it is acting; "agent" needs proof
     agent_request: AgentRequestIn | None = None
+
+
+class WarmEvent(BaseModel):
+    """One past transaction used to fill the feature store before going live (history only, nothing is scored)."""
+    customer_id: str = Field(min_length=1, max_length=64, pattern=ID)
+    payee_id: str | None = Field(default=None, min_length=1, max_length=64, pattern=ID)
+    amount_minor: int = Field(ge=0, le=10**13)
+    timestamp: int = Field(ge=0, le=10**11)
+    device_id: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:@ /()+-]+$")
 
 
 class FeedbackIn(BaseModel):
@@ -76,15 +101,45 @@ def create_app(model_dir: Path, tenants: TenantRegistry, verifier: Verifier | No
     missing = set(bundle.names) - available
     if missing:  # fail at startup, not at request time
         raise RuntimeError(f"model needs features the serving layer cannot provide: {sorted(missing)}")
+    for t in tenants.tenants:  # a budget with no calibrated threshold would silently challenge everything
+        for fpr in (t.challenge_fpr, t.block_fpr):
+            try:
+                bundle.threshold(fpr)
+            except ValueError as e:
+                raise RuntimeError(f"tenant {t.tenant_id}: {e}") from e
     if audit_path is not None and not audit_salt:
         raise RuntimeError("an audit salt is required when audit logging is on")
     stores: dict[str, OnlineFeatureStore] = {}
+    last_ts: dict[str, int] = {}  # per tenant: never record an event earlier than the last one
     results: OrderedDict = OrderedDict()  # (tenant, transaction_id) -> (body hash, response)
     feedback: deque = deque(maxlen=100_000)
     lock = threading.Lock()
+    policies: dict = {}  # per tenant verifier policy, built once
     app = FastAPI(title="AgentShield", version="0.1")
     app.state.bundle, app.state.feedback = bundle, feedback
-    app.state.store_for = lambda tenant_id: stores.setdefault(tenant_id, OnlineFeatureStore())
+    app.state.verifier, app.state.tenants = verifier, tenants
+
+    def store_for(tenant_id: str) -> OnlineFeatureStore:
+        s = stores.get(tenant_id)
+        if s is None:
+            s = stores[tenant_id] = OnlineFeatureStore()
+        return s
+
+    app.state.store_for = store_for
+
+    def warm(tenant_id: str, events) -> int:
+        """Fill a tenant's store from recent history so the first live requests do not look like first-time customers.
+        Events are applied in time order, and later live events can never be recorded earlier than the newest of them."""
+        with lock:
+            store = store_for(tenant_id)
+            n = 0
+            for e in sorted(events, key=lambda e: e.timestamp):
+                store.update(e.customer_id, e.payee_id, e.timestamp, e.amount_minor, e.device_id)
+                last_ts[tenant_id] = max(last_ts.get(tenant_id, 0), e.timestamp)
+                n += 1
+            return n
+
+    app.state.warm = warm
 
     def tenant_dep(x_api_key: str | None = Header(default=None)) -> Tenant:
         t = tenants.authenticate(x_api_key)
@@ -108,15 +163,31 @@ def create_app(model_dir: Path, tenants: TenantRegistry, verifier: Verifier | No
                     raise HTTPException(status_code=409, detail="transaction_id was already used with different content")
                 return prev
             ts = body.timestamp if (trust_client_ts and body.timestamp is not None) else int(clock())
-            store = app.state.store_for(tenant.tenant_id)
+            ts = max(ts, last_ts.get(tenant.tenant_id, 0))
+            last_ts[tenant.tenant_id] = ts
+            store = store_for(tenant.tenant_id)
             agent, agent_action = None, "allow"
-            if body.agent_request is not None:
+            ar = body.agent_request
+            if ar is not None:
                 if verifier is None:
                     agent, agent_action = {"outcome": "unverified", "reason": "verifier_not_configured", "tier": "unknown"}, "challenge"
+                elif not tenant.agent_authorities:  # agent trust is opt in: no policy, no trust
+                    agent, agent_action = {"outcome": "unverified", "reason": "agent_policy_not_configured", "tier": "unknown"}, "challenge"
+                elif ar.authority.lower() not in tenant.agent_authorities:
+                    agent, agent_action = {"outcome": "invalid", "reason": "authority_not_allowed", "tier": "none"}, "block"
+                elif tenant.agent_path_prefixes and not any(ar.path.startswith(p) for p in tenant.agent_path_prefixes):
+                    agent, agent_action = {"outcome": "invalid", "reason": "path_not_allowed", "tier": "none"}, "block"
                 else:
-                    r = verifier.verify(AgentReq(**body.agent_request.model_dump()))
+                    pol = policies.get(tenant.tenant_id)
+                    if pol is None:
+                        pol = policies[tenant.tenant_id] = tenant.agent_policy()
+                    d = ar.model_dump()
+                    b64 = d.pop("body_b64")
+                    r = verifier.verify(AgentReq(**d, body=base64.b64decode(b64) if b64 is not None else None), pol)
                     agent = {"outcome": r.outcome, "reason": r.reason, "tier": r.tier, "agent_id": r.agent_id}
                     agent_action = r.action
+            elif body.actor == "agent":  # says it is an agent but offers no proof: no trust is claimed
+                agent, agent_action = {"outcome": "unverified", "reason": "agent_not_proven", "tier": "unknown"}, "challenge"
             score, model_action, flags, feats = None, "challenge", [], None
             try:
                 feats = store.features(body.customer_id, body.payee_id, ts, body.amount_minor, body.device_id, body.channel,
@@ -134,9 +205,10 @@ def create_app(model_dir: Path, tenants: TenantRegistry, verifier: Verifier | No
                 ratio, prior = feats["sender_amt_ratio"], feats["sender_prior_cnt"]
                 if prior >= 5 and ratio == ratio and ratio >= tenant.spike_ratio:  # ratio == ratio filters NaN
                     flags.append("ONLINE_AMOUNT_SPIKE")
-                if feats["card_cnt_3600s"] >= tenant.burst_per_hour:
+                if feats["card_cnt_3600s"] + store.same_ts_count(body.customer_id, ts) >= tenant.burst_per_hour:
                     flags.append("ONLINE_BURST_1H")
-            except Exception:  # noqa: BLE001 - never allow because scoring or features failed
+            except Exception as e:  # noqa: BLE001 - never allow because scoring or features failed
+                log.warning("scoring failed (%s); challenging", type(e).__name__)
                 score, model_action = None, "challenge"
             flag_action = "challenge" if flags else "allow"
             action = max((model_action, agent_action, flag_action), key=SEVERITY.__getitem__)
@@ -144,10 +216,12 @@ def create_app(model_dir: Path, tenants: TenantRegistry, verifier: Verifier | No
             if score is not None and model_action != "allow":
                 try:
                     reasons = bundle.reasons(feats)
-                except Exception:  # noqa: BLE001
+                except Exception as e:  # noqa: BLE001
+                    log.warning("reason codes failed (%s)", type(e).__name__)
                     reasons = []
             if agent_action != "allow" and agent is not None:
-                reasons.insert(0, {"code": f"AGENT_{agent['reason'].upper()}", "text": f"Agent check: {agent['reason']}"})
+                code = agent["reason"].upper() if agent["reason"].startswith("agent_") else f"AGENT_{agent['reason'].upper()}"
+                reasons.insert(0, {"code": code, "text": f"Agent check: {agent['reason']}"})
             if score is None:
                 reasons.append({"code": "SCORING_UNAVAILABLE", "text": "Risk score unavailable; challenged for safety"})
             reasons += [{"code": f, "text": f.replace("ONLINE_", "").replace("_", " ").title()} for f in flags]
@@ -160,9 +234,12 @@ def create_app(model_dir: Path, tenants: TenantRegistry, verifier: Verifier | No
                 results.popitem(last=False)
             if audit_path is not None:
                 who = hashlib.sha256(f"{audit_salt}|{tenant.tenant_id}|{body.customer_id}".encode()).hexdigest()[:16]
-                with open(audit_path, "a") as f:
-                    f.write(json.dumps({"ts": ts, "tenant": tenant.tenant_id, "txn": body.transaction_id, "cust": who,
-                                        "action": action, "score": resp["score"], "reasons": [r["code"] for r in reasons]}) + "\n")
+                try:
+                    with open(audit_path, "a") as f:
+                        f.write(json.dumps({"ts": ts, "tenant": tenant.tenant_id, "txn": body.transaction_id, "cust": who,
+                                            "action": action, "score": resp["score"], "reasons": [r["code"] for r in reasons]}) + "\n")
+                except OSError as e:  # the decision is already made and recorded: do not turn it into a 500
+                    log.error("audit write failed (%s)", type(e).__name__)
             return resp
 
     @app.post("/v1/feedback", status_code=202)
