@@ -21,10 +21,26 @@ class Tenant:
     block_fpr: float = 0.005  # ... -> block
     spike_ratio: float = 10.0  # online amount-spike flag: amount >= this many times the sender's average
     burst_per_hour: int = 8  # online burst flag: this many earlier transactions in the last hour
+    # Agent trust is opt-in per tenant. Without agent_authorities, signed agent requests are not trusted at all.
+    agent_authorities: tuple = ()  # lower-case hosts the tenant's agents may act on, compared exactly
+    agent_path_prefixes: tuple = ()  # paths agents may act on; empty means any path on those hosts
+    agent_tag_routes: tuple = ()  # ((signature tag, (route prefix, ...)), ...): which tag may reach which route
 
     def __post_init__(self) -> None:
         if not 0 < self.block_fpr <= self.challenge_fpr < 1:
             raise ValueError("need 0 < block_fpr <= challenge_fpr < 1")
+        if any((not isinstance(a, str)) or not a or a != a.lower() for a in self.agent_authorities):
+            raise ValueError("agent_authorities must be non-empty lower-case hosts")
+        if any((not isinstance(p, str)) or not p.startswith("/") for p in self.agent_path_prefixes):
+            raise ValueError("agent_path_prefixes must start with a slash")
+        for tag, prefixes in self.agent_tag_routes:
+            if not tag or any(not p.startswith("/") for p in prefixes):
+                raise ValueError("agent_tag_routes needs a tag and route prefixes that start with a slash")
+
+    def agent_policy(self):
+        from agentshield.agent_trust.verifier import Policy
+
+        return Policy(tag_routes={tag: tuple(prefixes) for tag, prefixes in self.agent_tag_routes})
 
 
 class TenantRegistry:

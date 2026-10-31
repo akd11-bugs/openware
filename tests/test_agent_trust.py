@@ -490,3 +490,11 @@ def test_directory_keys_are_replay_protected_too(keys):
 def test_without_a_directory_the_local_registry_is_used(registry, keys):
     h = signed(keys, signature_agent=DIR_A)
     assert check(make(registry), h).outcome == "verified"
+
+
+def test_a_policy_given_per_call_overrides_the_default_for_that_call_only(registry, keys):
+    v = make(registry)
+    strict = Policy(tag_routes={"agent-payer-auth": ("/checkout",)})
+    h = signed(keys)  # a browsing tag on /product/42
+    assert v.verify(req(h), strict).reason == "unknown_tag"
+    assert v.verify(req(signed(keys))).outcome == "verified"  # the default policy still applies without an override

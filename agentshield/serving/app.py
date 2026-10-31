@@ -75,6 +75,7 @@ class AssessIn(BaseModel):
     channel: str | None = Field(default=None, max_length=32)
     instrument_type: str | None = Field(default=None, max_length=32)
     network: str | None = Field(default=None, max_length=32)
+    actor: str | None = Field(default=None, pattern=r"^(human|agent)$")  # who says it is acting; "agent" needs proof
     agent_request: AgentRequestIn | None = None
 
 
@@ -104,6 +105,7 @@ def create_app(model_dir: Path, tenants: TenantRegistry, verifier: Verifier | No
     results: OrderedDict = OrderedDict()  # (tenant, transaction_id) -> (body hash, response)
     feedback: deque = deque(maxlen=100_000)
     lock = threading.Lock()
+    policies: dict = {}  # per tenant verifier policy, built once
     app = FastAPI(title="AgentShield", version="0.1")
     app.state.bundle, app.state.feedback = bundle, feedback
 
@@ -141,15 +143,27 @@ def create_app(model_dir: Path, tenants: TenantRegistry, verifier: Verifier | No
             last_ts[tenant.tenant_id] = ts
             store = store_for(tenant.tenant_id)
             agent, agent_action = None, "allow"
-            if body.agent_request is not None:
+            ar = body.agent_request
+            if ar is not None:
                 if verifier is None:
                     agent, agent_action = {"outcome": "unverified", "reason": "verifier_not_configured", "tier": "unknown"}, "challenge"
+                elif not tenant.agent_authorities:  # agent trust is opt in: no policy, no trust
+                    agent, agent_action = {"outcome": "unverified", "reason": "agent_policy_not_configured", "tier": "unknown"}, "challenge"
+                elif ar.authority.lower() not in tenant.agent_authorities:
+                    agent, agent_action = {"outcome": "invalid", "reason": "authority_not_allowed", "tier": "none"}, "block"
+                elif tenant.agent_path_prefixes and not any(ar.path.startswith(p) for p in tenant.agent_path_prefixes):
+                    agent, agent_action = {"outcome": "invalid", "reason": "path_not_allowed", "tier": "none"}, "block"
                 else:
-                    d = body.agent_request.model_dump()
+                    pol = policies.get(tenant.tenant_id)
+                    if pol is None:
+                        pol = policies[tenant.tenant_id] = tenant.agent_policy()
+                    d = ar.model_dump()
                     b64 = d.pop("body_b64")
-                    r = verifier.verify(AgentReq(**d, body=base64.b64decode(b64) if b64 is not None else None))
+                    r = verifier.verify(AgentReq(**d, body=base64.b64decode(b64) if b64 is not None else None), pol)
                     agent = {"outcome": r.outcome, "reason": r.reason, "tier": r.tier, "agent_id": r.agent_id}
                     agent_action = r.action
+            elif body.actor == "agent":  # says it is an agent but offers no proof: no trust is claimed
+                agent, agent_action = {"outcome": "unverified", "reason": "agent_not_proven", "tier": "unknown"}, "challenge"
             score, model_action, flags, feats = None, "challenge", [], None
             try:
                 feats = store.features(body.customer_id, body.payee_id, ts, body.amount_minor, body.device_id, body.channel,

@@ -167,9 +167,10 @@ class Verifier:
         self.registry, self.nonces, self.policy, self.clock = registry, nonces, policy or Policy(), clock
         self.directory = directory  # a KeyDirectoryFetcher; when set, requests carrying Signature-Agent use it
 
-    def verify(self, req: Request) -> Result:
+    def verify(self, req: Request, policy: Policy | None = None) -> Result:
+        """`policy` overrides the default for this call only (the serving API passes each tenant's own)."""
         try:
-            return self._verify(req)
+            return self._verify(req, policy or self.policy)
         except (KeyDirectoryUnavailable, DirectoryError):
             return Result("unverified", "key_directory_unavailable", tier="unknown")
         except StoreUnavailable:
@@ -177,8 +178,7 @@ class Verifier:
         except Exception:  # noqa: BLE001 - any unexpected error blocks; never allow
             return Result("invalid", "internal_error")
 
-    def _verify(self, req: Request) -> Result:
-        pol = self.policy
+    def _verify(self, req: Request, pol: Policy) -> Result:
         if any(req.path.startswith(p) for p in pol.public_prefixes):
             return Result("not_required", "public_route")
         h = {k.lower(): v for k, v in req.headers.items()}

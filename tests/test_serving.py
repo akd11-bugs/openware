@@ -44,7 +44,10 @@ def client(model_dir, tmp_path):
     reg = KeyRegistry()
     reg.register("agent-1", "k1", "ed25519", public_bytes(keys["k1"]))
     ver = Verifier(reg, InMemoryNonceStore(), Policy(), clock=lambda: NOW)
-    tenants = TenantRegistry([Tenant("t1", hash_key(KEY)), Tenant("t2", hash_key("other-key"), challenge_fpr=0.01, block_fpr=0.001)])
+    tenants = TenantRegistry([
+        Tenant("t1", hash_key(KEY), agent_authorities=("shop.in",), agent_path_prefixes=("/product", "/checkout"),
+               agent_tag_routes=(("agent-browser-auth", ("/product",)), ("agent-payer-auth", ("/checkout",)))),
+        Tenant("t2", hash_key("other-key"), challenge_fpr=0.01, block_fpr=0.001)])
     app = create_app(model_dir, tenants, ver, audit_path=tmp_path / "audit.jsonl", audit_salt="test-salt", clock=lambda: NOW,
                      trust_client_ts=True)
     c = TestClient(app)
@@ -264,7 +267,7 @@ def test_burst_inside_one_second_is_still_flagged(client):
 
 def signed_post(client, body: bytes, **kw):
     h = sign_request(client.keys["k1"], "k1", method="POST", authority="shop.in", path="/checkout/pay",
-                     tag="agent-browser-auth", now=NOW, body=body, **kw)
+                     tag="agent-payer-auth", now=NOW, body=body, **kw)
     return {"method": "POST", "authority": "shop.in", "path": "/checkout/pay", "query": "", "headers": h}
 
 
@@ -280,3 +283,56 @@ def test_agent_request_body_is_bound_to_the_signature(client):
 def test_invalid_base64_body_is_rejected(client):
     ar = {**signed_post(client, b"x"), "body_b64": "not base64 !!!"}
     assert post(client, txn(3, amount=1000, agent_request=ar)).status_code == 422
+
+
+# ---- per-tenant agent policy ----
+def agent_req(client, authority="shop.in", path="/product/1", tag="agent-browser-auth", method="GET"):
+    h = sign_request(client.keys["k1"], "k1", method=method, authority=authority, path=path, tag=tag, now=NOW)
+    return {"method": method, "authority": authority, "path": path, "query": "", "headers": h}
+
+
+def test_an_agent_signed_for_a_domain_the_tenant_did_not_pin_is_blocked(client):
+    r = post(client, txn(1, amount=1000, agent_request=agent_req(client, authority="evil.example"))).json()
+    assert r["action"] == "block" and r["agent"]["reason"] == "authority_not_allowed"
+
+
+def test_an_agent_acting_outside_the_pinned_paths_is_blocked(client):
+    r = post(client, txn(1, amount=1000, agent_request=agent_req(client, path="/admin/users"))).json()
+    assert r["action"] == "block" and r["agent"]["reason"] == "path_not_allowed"
+
+
+def test_the_tenants_tag_to_route_map_stops_a_browsing_tag_on_a_payment_route(client):
+    r = post(client, txn(1, amount=1000, agent_request=agent_req(client, path="/checkout/pay", tag="agent-browser-auth"))).json()
+    assert r["action"] == "block" and r["agent"]["reason"] == "tag_route_mismatch"
+    ok = post(client, txn(2, amount=1000, agent_request=agent_req(client, path="/checkout/pay", tag="agent-payer-auth"))).json()
+    assert ok["agent"]["outcome"] == "verified" and ok["action"] == "allow"
+
+
+def test_a_tenant_with_no_agent_policy_does_not_trust_agent_signatures(client):
+    r = post(client, txn(1, amount=1000, agent_request=agent_req(client)), key="other-key").json()
+    assert r["action"] == "challenge" and r["agent"]["reason"] == "agent_policy_not_configured"
+
+
+def test_an_actor_who_says_agent_but_proves_nothing_is_challenged(client):
+    r = post(client, {**txn(1, amount=1000), "actor": "agent"}).json()
+    assert r["action"] == "challenge" and r["agent"]["reason"] == "agent_not_proven"
+
+
+def test_no_agent_claim_is_made_when_nothing_is_declared(client):
+    r = post(client, txn(1, amount=1000)).json()
+    assert r["agent"] is None and r["action"] == "allow"
+    h = post(client, {**txn(2, amount=1000), "actor": "human"}).json()
+    assert h["agent"] is None and h["action"] == "allow"
+
+
+def test_actor_is_validated(client):
+    assert post(client, {**txn(1), "actor": "robot"}).status_code == 422
+
+
+def test_tenant_agent_settings_are_validated():
+    with pytest.raises(ValueError):
+        Tenant("x", "h", agent_authorities=("",))
+    with pytest.raises(ValueError):
+        Tenant("x", "h", agent_authorities=("Shop.IN",))  # authorities are compared as given, so they must be lower case
+    with pytest.raises(ValueError):
+        Tenant("x", "h", agent_path_prefixes=("product",))  # must start with a slash
