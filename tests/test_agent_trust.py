@@ -33,8 +33,8 @@ def make(registry, store=None, policy=None, now=NOW):
     return Verifier(registry, store or InMemoryNonceStore(), policy or Policy(), clock=lambda: now)
 
 
-def req(headers, method="GET", path="/product/42", query="", authority=HOST):
-    return Request(method=method, authority=authority, path=path, query=query, headers=headers)
+def req(headers, method="GET", path="/product/42", query="", authority=HOST, body=None):
+    return Request(method=method, authority=authority, path=path, query=query, headers=headers, body=body)
 
 
 def signed(keys, who="k1", **kw):
@@ -324,3 +324,68 @@ def test_weak_rsa_keys_cannot_be_registered(registry):
 def test_garbage_rsa_public_key_is_rejected_at_registration(registry):
     with pytest.raises(ValueError):
         registry.register("a", "bad", "rsa-pss-sha256", b"not a key")
+
+
+# ---- content-digest (RFC 9530) ----
+import base64 as _b64  # noqa: E402
+import hashlib as _hl  # noqa: E402
+
+BODY = b'{"amount": 500, "payee": "shop-1"}'
+
+
+def digest(body: bytes, algo="sha-256") -> str:
+    h = _hl.sha256(body) if algo == "sha-256" else _hl.sha512(body)
+    return f"{algo}=:{_b64.b64encode(h.digest()).decode()}:"
+
+
+def post_signed(keys, body=BODY, **kw):
+    kw.setdefault("method", "POST")
+    kw.setdefault("path", "/checkout/pay")
+    return signed(keys, body=body, **kw)
+
+
+def test_signed_body_with_matching_digest_is_verified(registry, keys):
+    h = post_signed(keys)
+    assert h["content-digest"] == digest(BODY)
+    r = check(make(registry), h, method="POST", path="/checkout/pay", body=BODY)
+    assert r.outcome == "verified"
+
+
+def test_body_changed_after_signing_is_invalid(registry, keys):
+    h = post_signed(keys)
+    r = check(make(registry), h, method="POST", path="/checkout/pay", body=b'{"amount": 50000, "payee": "evil"}')
+    assert (r.outcome, r.reason) == ("invalid", "digest_mismatch")
+
+
+def test_body_and_digest_header_both_swapped_still_fails_the_signature(registry, keys):
+    h = post_signed(keys)
+    evil = b'{"amount": 50000}'
+    h["content-digest"] = digest(evil)  # the signature covered the ORIGINAL header value
+    r = check(make(registry), h, method="POST", path="/checkout/pay", body=evil)
+    assert r.reason == "bad_signature"
+
+
+def test_a_body_the_signature_does_not_cover_is_invalid(registry, keys):
+    h = post_signed(keys, cover_body=False)
+    r = check(make(registry), h, method="POST", path="/checkout/pay", body=BODY)
+    assert r.reason == "body_not_covered"
+
+
+def test_covered_digest_but_missing_or_malformed_header_is_invalid(registry, keys):
+    h = post_signed(keys)
+    gone = {k: v for k, v in h.items() if k != "content-digest"}
+    assert check(make(registry), gone, method="POST", path="/checkout/pay", body=BODY).reason == "bad_content_digest"
+    for junk in ["sha-256=:short:", "md5=:AAAA:", "sha-256=AAAA", digest(BODY, "sha-512"), digest(BODY) + "\n"]:
+        h2 = {**h, "content-digest": junk}
+        r = check(make(registry), h2, method="POST", path="/checkout/pay", body=BODY)
+        assert r.outcome == "invalid" and r.reason in ("bad_content_digest", "bad_signature"), junk
+
+
+def test_requests_without_a_body_do_not_need_a_digest(registry, keys):
+    assert check(make(registry), signed(keys), body=None).outcome == "verified"
+    assert check(make(registry), signed(keys), body=b"").outcome == "verified"
+
+
+def test_empty_body_with_a_covered_correct_digest_is_verified(registry, keys):
+    h = post_signed(keys, body=b"")
+    assert check(make(registry), h, method="POST", path="/checkout/pay", body=b"").outcome == "verified"

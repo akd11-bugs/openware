@@ -260,3 +260,23 @@ def test_audit_write_failure_does_not_turn_a_decision_into_an_error(model_dir, t
 def test_burst_inside_one_second_is_still_flagged(client):
     out = [post(client, {**txn(i, amount=1000), "timestamp": NOW}).json() for i in range(1, 13)]
     assert any("ONLINE_BURST_1H" in o["anomaly_flags"] for o in out)
+
+
+def signed_post(client, body: bytes, **kw):
+    h = sign_request(client.keys["k1"], "k1", method="POST", authority="shop.in", path="/checkout/pay",
+                     tag="agent-browser-auth", now=NOW, body=body, **kw)
+    return {"method": "POST", "authority": "shop.in", "path": "/checkout/pay", "query": "", "headers": h}
+
+
+def test_agent_request_body_is_bound_to_the_signature(client):
+    import base64
+    good = b'{"amount": 500}'
+    ok = post(client, txn(1, amount=1000, agent_request={**signed_post(client, good), "body_b64": base64.b64encode(good).decode()})).json()
+    assert ok["agent"]["outcome"] == "verified"
+    swapped = post(client, txn(2, amount=1000, agent_request={**signed_post(client, good), "body_b64": base64.b64encode(b'{"amount": 99999}').decode()})).json()
+    assert swapped["action"] == "block" and swapped["agent"]["reason"] == "digest_mismatch"
+
+
+def test_invalid_base64_body_is_rejected(client):
+    ar = {**signed_post(client, b"x"), "body_b64": "not base64 !!!"}
+    assert post(client, txn(3, amount=1000, agent_request=ar)).status_code == 422

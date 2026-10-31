@@ -7,6 +7,8 @@ Three outcomes, never allow on failure:
 Pure deterministic code: no ML, no network. Closes the gaps found in docs/research/visa-tap-and-web-bot-auth-review.md.
 """
 import base64
+import hashlib
+import hmac
 import re
 import threading
 import time
@@ -19,12 +21,13 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from .signer import component_line
 
-ALLOWED_COMPONENTS = {"@method", "@authority", "@path", "@query"}
+ALLOWED_COMPONENTS = {"@method", "@authority", "@path", "@query", "content-digest"}
 SUPPORTED_ALGS = {"ed25519", "rsa-pss-sha256"}
 MIN_RSA_BITS = 2048
 MANDATORY_PARAMS = ("created", "expires", "nonce", "keyid", "alg", "tag")
 _INPUT = re.compile(r'^([a-z][a-z0-9_-]{0,15})=\(((?:"[@a-z0-9_-]+"(?: "[@a-z0-9_-]+")*)?)\)((?:;[a-z]+=(?:\d{1,12}|"[A-Za-z0-9._~-]{1,64}"))*)\Z')
 _SIG = re.compile(r"^([a-z][a-z0-9_-]{0,15})=:([A-Za-z0-9+/]+={0,2}):\Z")
+_DIGEST = re.compile(r"^sha-256=:([A-Za-z0-9+/]{43}=):\Z")
 _NONCE = re.compile(r"^[A-Za-z0-9._~-]{8,64}\Z")
 
 
@@ -43,6 +46,7 @@ class Request:
     path: str  # without query string
     headers: dict
     query: str = ""
+    body: bytes | None = None  # the exact bytes received; a non-empty body must be covered by a content-digest
 
 
 @dataclass
@@ -200,6 +204,16 @@ class Verifier:
             return Result("invalid", "unknown_component")
         if not set(pol.required_components) <= set(covered):
             return Result("invalid", "components_missing")
+        if req.body and "content-digest" not in covered:
+            return Result("invalid", "body_not_covered")  # a body the signature does not bind could be swapped
+        digest_header = h.get("content-digest", "")
+        if "content-digest" in covered:
+            m_d = _DIGEST.match(digest_header)
+            if not m_d:
+                return Result("invalid", "bad_content_digest")
+            actual = hashlib.sha256(req.body or b"").digest()
+            if not hmac.compare_digest(base64.b64decode(m_d.group(1)), actual):
+                return Result("invalid", "digest_mismatch")
         if pol.tag_routes:
             prefixes = pol.tag_routes.get(params["tag"])
             if prefixes is None:
@@ -222,7 +236,7 @@ class Verifier:
             return Result("invalid", "key_revoked", rec.agent_id)
         if rec.alg != params["alg"]:
             return Result("invalid", "alg_mismatch", rec.agent_id)
-        base = "\n".join([component_line(c, req.method, req.authority, req.path, req.query.lstrip("?")) for c in covered]
+        base = "\n".join([component_line(c, req.method, req.authority, req.path, req.query.lstrip("?"), digest_header) for c in covered]
                          + [f'"@signature-params": {sig_in.split("=", 1)[1]}'])
         try:
             sig_bytes = base64.b64decode(m_sig.group(2))

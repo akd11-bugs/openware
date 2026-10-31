@@ -11,6 +11,8 @@ Design points (from the security review):
 - SINGLE PROCESS ONLY: state (online store, nonce store, results) lives in memory. Several workers would let a
   signed request be replayed once per worker. A shared store (Redis) removes this limit.
 """
+import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -42,6 +44,17 @@ class AgentRequestIn(BaseModel):
     path: str = Field(max_length=1024)
     query: str = Field(default="", max_length=2048)
     headers: dict[str, str]
+    body_b64: str | None = Field(default=None, max_length=1_400_000)  # the agent's original request body, base64
+
+    @field_validator("body_b64")
+    @classmethod
+    def _valid_b64(cls, v):
+        if v is not None:
+            try:
+                base64.b64decode(v, validate=True)
+            except (binascii.Error, ValueError) as e:
+                raise ValueError("body_b64 is not valid base64") from e
+        return v
 
     @field_validator("headers")
     @classmethod
@@ -132,7 +145,9 @@ def create_app(model_dir: Path, tenants: TenantRegistry, verifier: Verifier | No
                 if verifier is None:
                     agent, agent_action = {"outcome": "unverified", "reason": "verifier_not_configured", "tier": "unknown"}, "challenge"
                 else:
-                    r = verifier.verify(AgentReq(**body.agent_request.model_dump()))
+                    d = body.agent_request.model_dump()
+                    b64 = d.pop("body_b64")
+                    r = verifier.verify(AgentReq(**d, body=base64.b64decode(b64) if b64 is not None else None))
                     agent = {"outcome": r.outcome, "reason": r.reason, "tier": r.tier, "agent_id": r.agent_id}
                     agent_action = r.action
             score, model_action, flags, feats = None, "challenge", [], None
