@@ -389,3 +389,104 @@ def test_requests_without_a_body_do_not_need_a_digest(registry, keys):
 def test_empty_body_with_a_covered_correct_digest_is_verified(registry, keys):
     h = post_signed(keys, body=b"")
     assert check(make(registry), h, method="POST", path="/checkout/pay", body=b"").outcome == "verified"
+
+
+# ---- Signature-Agent and the key directory ----
+import json as _json  # noqa: E402
+
+from agentshield.agent_trust.directory import KeyDirectoryFetcher, jwk_thumbprint  # noqa: E402
+
+DIR_A = "https://agent.example.com/.well-known/http-message-signatures-directory"
+DIR_B = "https://other.example.com/.well-known/http-message-signatures-directory"
+DIR_CT = "application/http-message-signatures-directory+json"
+
+
+def _jwk(priv):
+    return {"kty": "OKP", "crv": "Ed25519", "x": _b64.urlsafe_b64encode(public_bytes(priv)).decode().rstrip("=")}
+
+
+class DirHttp:
+    """Serves a directory per host and counts the calls."""
+
+    def __init__(self, by_host, status=200):
+        self.by_host, self.status, self.calls = by_host, status, []
+
+    def __call__(self, ip, host, path, timeout, max_bytes):
+        self.calls.append(host)
+        return self.status, DIR_CT, _json.dumps({"keys": [_jwk(p) for p in self.by_host.get(host, [])]}).encode()
+
+
+def verifier_with_directory(by_host, status=200, resolve=None):
+    http = DirHttp(by_host, status)
+    fetcher = KeyDirectoryFetcher(resolve=resolve or (lambda h: ["93.184.216.34"]), http_get=http, clock=lambda: NOW)
+    return Verifier(KeyRegistry(), InMemoryNonceStore(), Policy(), clock=lambda: NOW, directory=fetcher), http
+
+
+def agent_signed(priv, url=DIR_A, **kw):
+    kw.setdefault("method", "GET")
+    kw.setdefault("authority", HOST)
+    kw.setdefault("path", "/product/42")
+    kw.setdefault("tag", "agent-browser-auth")
+    kw.setdefault("now", NOW)
+    return sign_request(priv, jwk_thumbprint(_jwk(priv)), signature_agent=url, **kw)
+
+
+def test_a_key_found_in_the_directory_is_verified(keys):
+    v, _ = verifier_with_directory({"agent.example.com": [keys["k1"]]})
+    r = check(v, agent_signed(keys["k1"]))
+    assert (r.outcome, r.agent_id) == ("verified", DIR_A)
+
+
+def test_directory_failure_is_unverified_never_allow(keys):
+    v, _ = verifier_with_directory({"agent.example.com": [keys["k1"]]}, status=500)
+    r = check(v, agent_signed(keys["k1"]))
+    assert (r.outcome, r.reason, r.action) == ("unverified", "key_directory_unavailable", "challenge")
+
+
+def test_a_key_missing_from_the_directory_is_unverified(keys):
+    v, _ = verifier_with_directory({"agent.example.com": [keys["k2"]]})
+    assert check(v, agent_signed(keys["k1"])).reason == "unknown_key"
+
+
+def test_signature_agent_must_be_covered_by_the_signature(keys):
+    v, _ = verifier_with_directory({"agent.example.com": [keys["k1"]]})
+    assert check(v, agent_signed(keys["k1"], cover_agent=False)).reason == "signature_agent_not_covered"
+
+
+def test_signature_agent_must_be_https(keys):
+    v, http = verifier_with_directory({"agent.example.com": [keys["k1"]]})
+    r = check(v, agent_signed(keys["k1"], url="http://agent.example.com/dir"))
+    assert r.reason == "bad_signature_agent" and http.calls == []
+
+
+def test_a_claimed_thumbprint_cannot_be_used_with_someone_elses_signature(keys):
+    v, _ = verifier_with_directory({"agent.example.com": [keys["k1"]]})
+    victim_id = jwk_thumbprint(_jwk(keys["k1"]))
+    forged = sign_request(keys["k2"], victim_id, method="GET", authority=HOST, path="/product/42", tag="agent-browser-auth",
+                          now=NOW, signature_agent=DIR_A)
+    assert check(v, forged).reason == "bad_signature"
+
+
+def test_directory_urls_pointing_inside_the_network_are_never_fetched(keys):
+    v, http = verifier_with_directory({}, resolve=lambda h: ["10.0.0.5"])
+    for url in ("https://internal.example.com/dir", "https://10.0.0.5/dir", "https://169.254.169.254/latest"):
+        r = check(v, agent_signed(keys["k1"], url=url))
+        assert (r.outcome, r.reason) == ("unverified", "key_directory_unavailable")
+    assert http.calls == []
+
+
+def test_keys_are_looked_up_by_directory_and_key_together(keys):
+    v, _ = verifier_with_directory({"agent.example.com": [keys["k1"]], "other.example.com": [keys["k2"]]})
+    assert check(v, agent_signed(keys["k1"], url=DIR_B)).reason == "unknown_key"  # the key exists, but not in THAT directory
+    assert check(v, agent_signed(keys["k1"], url=DIR_A)).outcome == "verified"
+
+
+def test_directory_keys_are_replay_protected_too(keys):
+    v, _ = verifier_with_directory({"agent.example.com": [keys["k1"]]})
+    h = agent_signed(keys["k1"], nonce="dir-nonce-0001")
+    assert check(v, h).outcome == "verified" and check(v, h).reason == "replayed_nonce"
+
+
+def test_without_a_directory_the_local_registry_is_used(registry, keys):
+    h = signed(keys, signature_agent=DIR_A)
+    assert check(make(registry), h).outcome == "verified"

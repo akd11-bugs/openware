@@ -19,14 +19,16 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from .directory import DirectoryError
 from .signer import component_line
 
-ALLOWED_COMPONENTS = {"@method", "@authority", "@path", "@query", "content-digest"}
+ALLOWED_COMPONENTS = {"@method", "@authority", "@path", "@query", "content-digest", "signature-agent"}
 SUPPORTED_ALGS = {"ed25519", "rsa-pss-sha256"}
 MIN_RSA_BITS = 2048
 MANDATORY_PARAMS = ("created", "expires", "nonce", "keyid", "alg", "tag")
 _INPUT = re.compile(r'^([a-z][a-z0-9_-]{0,15})=\(((?:"[@a-z0-9_-]+"(?: "[@a-z0-9_-]+")*)?)\)((?:;[a-z]+=(?:\d{1,12}|"[A-Za-z0-9._~-]{1,64}"))*)\Z')
 _SIG = re.compile(r"^([a-z][a-z0-9_-]{0,15})=:([A-Za-z0-9+/]+={0,2}):\Z")
+_SIGAGENT = re.compile(r'^(?:[a-z][a-z0-9_-]{0,15}=)?"(https://[^"\s]{1,2000})"\Z')
 _DIGEST = re.compile(r"^sha-256=:([A-Za-z0-9+/]{43}=):\Z")
 _NONCE = re.compile(r"^[A-Za-z0-9._~-]{8,64}\Z")
 
@@ -160,13 +162,15 @@ class InMemoryNonceStore:
 
 
 class Verifier:
-    def __init__(self, registry: KeyRegistry, nonces: InMemoryNonceStore, policy: Policy | None = None, clock=time.time):
+    def __init__(self, registry: KeyRegistry, nonces: InMemoryNonceStore, policy: Policy | None = None, clock=time.time,
+                 directory=None):
         self.registry, self.nonces, self.policy, self.clock = registry, nonces, policy or Policy(), clock
+        self.directory = directory  # a KeyDirectoryFetcher; when set, requests carrying Signature-Agent use it
 
     def verify(self, req: Request) -> Result:
         try:
             return self._verify(req)
-        except KeyDirectoryUnavailable:
+        except (KeyDirectoryUnavailable, DirectoryError):
             return Result("unverified", "key_directory_unavailable", tier="unknown")
         except StoreUnavailable:
             return Result("unverified", "nonce_store_unavailable", tier="unknown")
@@ -206,6 +210,14 @@ class Verifier:
             return Result("invalid", "components_missing")
         if req.body and "content-digest" not in covered:
             return Result("invalid", "body_not_covered")  # a body the signature does not bind could be swapped
+        agent_url = None
+        if self.directory is not None and "signature-agent" in h:
+            m_sa = _SIGAGENT.match(h["signature-agent"])
+            if not m_sa:
+                return Result("invalid", "bad_signature_agent")
+            if "signature-agent" not in covered:
+                return Result("invalid", "signature_agent_not_covered")  # otherwise a swapped directory would go unnoticed
+            agent_url = m_sa.group(1)
         digest_header = h.get("content-digest", "")
         if "content-digest" in covered:
             m_d = _DIGEST.match(digest_header)
@@ -229,14 +241,18 @@ class Verifier:
             return Result("invalid", "lifetime_too_long")
         if now > params["expires"]:
             return Result("invalid", "expired")
-        rec = self.registry.get(params["keyid"])
+        if agent_url is not None:  # keys are looked up by (directory, thumbprint), never by a bare key id
+            entry = self.directory.keys(agent_url).get(params["keyid"])
+            rec = KeyRecord(agent_url, params["keyid"], entry[0], entry[2], loaded=entry[1]) if entry else None
+        else:
+            rec = self.registry.get(params["keyid"])
         if rec is None:
             return Result("unverified", "unknown_key", tier="unknown")
         if not rec.active:
             return Result("invalid", "key_revoked", rec.agent_id)
         if rec.alg != params["alg"]:
             return Result("invalid", "alg_mismatch", rec.agent_id)
-        base = "\n".join([component_line(c, req.method, req.authority, req.path, req.query.lstrip("?"), digest_header) for c in covered]
+        base = "\n".join([component_line(c, req.method, req.authority, req.path, req.query.lstrip("?"), digest_header, h.get("signature-agent", "")) for c in covered]
                          + [f'"@signature-params": {sig_in.split("=", 1)[1]}'])
         try:
             sig_bytes = base64.b64decode(m_sig.group(2))
