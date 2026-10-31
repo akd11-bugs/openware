@@ -108,6 +108,7 @@ def create_app(model_dir: Path, tenants: TenantRegistry, verifier: Verifier | No
     policies: dict = {}  # per tenant verifier policy, built once
     app = FastAPI(title="AgentShield", version="0.1")
     app.state.bundle, app.state.feedback = bundle, feedback
+    app.state.verifier, app.state.tenants = verifier, tenants
 
     def store_for(tenant_id: str) -> OnlineFeatureStore:
         s = stores.get(tenant_id)
