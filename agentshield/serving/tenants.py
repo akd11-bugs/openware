@@ -31,6 +31,10 @@ class TenantRegistry:
     def __init__(self, tenants: list[Tenant]) -> None:
         self._tenants = list(tenants)
 
+    @property
+    def tenants(self) -> list:
+        return list(self._tenants)
+
     def authenticate(self, api_key: str | None) -> Tenant | None:
         if not api_key:
             return None

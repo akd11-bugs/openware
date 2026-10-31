@@ -13,7 +13,7 @@ A risk API for fintechs. One call checks a payment for fraud, flags unusual beha
 | Agent verification | 43 attack tests pass, about 43 microseconds per check | Forged, replayed, expired and other attacks |
 | API over local HTTP | p50 0.8 ms, p99 1.4 ms, about 1,200 requests per second | Excludes a network hop and a real Redis lookup |
 
-The Kaggle winner scored 0.9459 on a hidden test set. Ours is a different test, so the two numbers are not comparable. 188 tests pass.
+The Kaggle winner scored 0.9459 on a hidden test set. Ours is a different test, so the two numbers are not comparable. 215 tests pass, and they pass on a fresh clone with no data.
 
 ## How we got there
 

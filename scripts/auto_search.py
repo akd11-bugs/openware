@@ -9,6 +9,7 @@ Needs ANTHROPIC_API_KEY (loaded from .env). Never touches the test period.
 """
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -19,7 +20,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import pandas as pd  # noqa: E402
 
-from agentshield.txn.autosearch import parse_proposal, wrap_module  # noqa: E402
+from agentshield.txn.autosearch import ensure_new, parse_proposal, safe_child_env, wrap_module  # noqa: E402
 from check_key import load_env  # noqa: E402
 
 MODEL = "claude-sonnet-5-5"
@@ -68,7 +69,7 @@ def run_experiment(groups, params, extras, track, n_jobs):
            "--groups", ",".join(groups), "--params", json.dumps(params)]
     for e in extras:
         cmd += ["--extra", e]
-    p = subprocess.run(cmd, capture_output=True, text=True, timeout=1500, cwd=ROOT)
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=1500, cwd=ROOT, env=safe_child_env(os.environ, ROOT))
     if p.returncode != 0:
         raise RuntimeError(p.stderr[-300:])
     return json.loads(p.stdout.strip().splitlines()[-1])
@@ -111,9 +112,10 @@ def main() -> None:
             if prop["action"] == "group":
                 name = prop["name"]
                 path = ROOT / f"experiments/auto/{a.track}_{name}.py"
+                ensure_new(path)
                 path.write_text(wrap_module(name, prop["code"]))
                 chk = subprocess.run([sys.executable, str(ROOT / "scripts/check_causal.py"), "--extra", str(path), "--group", name],
-                                     capture_output=True, text=True, timeout=300, cwd=ROOT)
+                                     capture_output=True, text=True, timeout=300, cwd=ROOT, env=safe_child_env(os.environ, ROOT))
                 if chk.returncode != 0:
                     raise ValueError(chk.stdout.strip()[:200] or chk.stderr[-200:])
                 res = run_experiment(groups + [name], params, extras + [str(path)], a.track, a.n_jobs)

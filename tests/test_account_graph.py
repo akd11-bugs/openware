@@ -60,3 +60,12 @@ def test_requires_time_sorted_input_and_exposes_feature_names():
     with pytest.raises(ValueError):
         account_graph_features(frame(BASE).iloc[::-1])
     assert set(GRAPH_FEATURES) == set(account_graph_features(frame(BASE)).columns)
+
+
+def test_missing_accounts_get_no_features_and_are_not_pooled():
+    df = pd.DataFrame({"sender_id": ["A", "B", "C", None], "receiver_id": [None, None, "D", "D"],
+                       "ts": [10, 20, 30, 40], "amount_minor": [100, 50, 5, 7], "label": [0, 0, 0, 0]})
+    f = account_graph_features(df)
+    assert f.loc[[0, 1], [c for c in f.columns if c.startswith("rcv_")]].isna().all().all()  # unknown receiver
+    assert f.loc[3, [c for c in f.columns if c.startswith("snd_")]].isna().all()  # unknown sender
+    assert f.loc[3, "rcv_in_cnt"] == 1 and f.loc[2, "rcv_in_cnt"] == 0  # D's history is only its own inflows

@@ -234,3 +234,29 @@ def test_instrument_fields_are_accepted_and_validated(client):
     ok = {**txn(1, amount=1000), "channel": "W", "instrument_type": "debit", "network": "visa", "device_id": "Pixel 7 Build/TQ3A"}
     assert post(client, ok).status_code == 200
     assert post(client, {**txn(2), "device_id": "bad;id<script>"}).status_code == 422
+
+
+def test_startup_fails_if_a_tenant_budget_has_no_calibrated_threshold(model_dir):
+    bad = TenantRegistry([Tenant("odd", hash_key(KEY), challenge_fpr=0.07, block_fpr=0.005)])
+    with pytest.raises(RuntimeError, match="odd"):
+        create_app(model_dir, bad)
+
+
+def test_out_of_order_timestamps_cannot_corrupt_history(client):
+    post(client, {**txn(1, amount=1000), "timestamp": NOW + 100})
+    post(client, {**txn(2, amount=1000), "timestamp": NOW + 50})  # arrives late; recorded no earlier than the last event
+    f = client.app.state.store_for("t1").features("c1", None, NOW + 200, 1000)
+    assert f["sender_since_last"] == 100 and f["sender_prior_cnt"] == 2
+
+
+def test_audit_write_failure_does_not_turn_a_decision_into_an_error(model_dir, tmp_path):
+    tenants = TenantRegistry([Tenant("t1", hash_key(KEY))])
+    c = TestClient(create_app(model_dir, tenants, audit_path=tmp_path / "missing_dir" / "audit.jsonl", audit_salt="s",
+                              clock=lambda: NOW, trust_client_ts=True))
+    r = post(c, txn(1, amount=1000))
+    assert r.status_code == 200 and r.json()["action"] in ("allow", "challenge", "block")
+
+
+def test_burst_inside_one_second_is_still_flagged(client):
+    out = [post(client, {**txn(i, amount=1000), "timestamp": NOW}).json() for i in range(1, 13)]
+    assert any("ONLINE_BURST_1H" in o["anomaly_flags"] for o in out)

@@ -4,6 +4,7 @@ The big changes and why we made them. Small fixes are in git history. Newest fir
 
 ## 2026-10-31
 
+- **Review fixes.** Three independent reviews (code, security, tests) found real problems, and the cheap ones are fixed. Tests no longer fail on a fresh clone, and there is a CI job. Missing receivers and accounts are no longer pooled into one fake account. The API validates tenant budgets at startup, never lets a late event rewrite history, flags bursts inside one second, and survives an audit write failure. The pickle cache is hash checked. The auto-search code check is stricter and its child process no longer inherits API keys. Still open: a real sandbox for model-written code, same-second bursts in the model features, and a shared constants module.
 - **Mule benchmark on IBM AML.** Graph features lifted recall at 1% false alarms from 50.4% to 73.9% (AUC 0.946 to 0.982), with fan-in, fan-out and gather-scatter rings gaining most and cycles least. Why: a second dataset built around laundering rings. Both datasets are synthetic.
 - **Mule benchmark on PaySim.** Account graph features beat a plain model by about 25 points of recall at 1% false alarms (AUC 0.971 against 0.944). Why: this was the decision gate for the pitch. Caveat: PaySim is synthetic, and the graph model is weaker at the strictest budget.
 - **Scoring API, model cards, drift monitoring.** The API combines the agent check, real-time features, the model and per-tenant thresholds. Each model has a card with its settings and test results, and a card with test results blocks a second test run.

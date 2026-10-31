@@ -6,8 +6,10 @@
 Prints one JSON line. Only validation metrics exist here; the test period is never scored by this script.
 """
 import argparse
+import hashlib
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -29,23 +31,48 @@ INDIAN_CACHE = ROOT / "data/cache/indian_ctx.pkl"
 INDIAN_DIR = INDIAN.parent
 
 
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _load_verified(path: Path):
+    """Unpickling runs code, so only load a cache whose hash matches the one recorded when we wrote it."""
+    side = path.with_name(path.name + ".sha256")
+    if path.exists() and side.exists() and side.read_text().strip() == _sha256(path):
+        return pd.read_pickle(path)
+    return None
+
+
+def _save_verified(df: pd.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_pickle(path)
+    os.chmod(path, 0o600)
+    path.with_name(path.name + ".sha256").write_text(_sha256(path))
+
+
 def load_df(dataset: str = "ieee") -> pd.DataFrame:
     if dataset == "indian":
-        if not INDIAN_CACHE.exists():
-            from agentshield.txn.loaders import indian_fin_to_standard
+        cached = _load_verified(INDIAN_CACHE)
+        if cached is not None:
+            return cached
+        from agentshield.txn.loaders import indian_fin_to_standard
 
-            INDIAN_CACHE.parent.mkdir(parents=True, exist_ok=True)
-            indian_fin_to_standard(pd.read_csv(INDIAN), pd.read_csv(INDIAN_DIR / "Cards_Data.csv"),
-                                   pd.read_csv(INDIAN_DIR / "Cusmtomer_data.csv")).to_pickle(INDIAN_CACHE)
-        return pd.read_pickle(INDIAN_CACHE)
-    if CACHE.exists():
-        return pd.read_pickle(CACHE)
+        df = indian_fin_to_standard(pd.read_csv(INDIAN), pd.read_csv(INDIAN_DIR / "Cards_Data.csv"),
+                                    pd.read_csv(INDIAN_DIR / "Cusmtomer_data.csv"))
+        _save_verified(df, INDIAN_CACHE)
+        return df
+    cached = _load_verified(CACHE)
+    if cached is not None:
+        return cached
     tx = pd.read_csv(IEEE / "train_transaction.csv")
     ident = pd.read_csv(IEEE / "train_identity.csv")
     df = ieee_cis_to_standard(tx, ident)
     assert df["ts"].is_monotonic_increasing and df.index.is_unique
-    CACHE.parent.mkdir(parents=True, exist_ok=True)
-    df.to_pickle(CACHE)
+    _save_verified(df, CACHE)
     return df
 
 

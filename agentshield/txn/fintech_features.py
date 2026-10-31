@@ -127,12 +127,16 @@ def device_share(df: pd.DataFrame) -> pd.DataFrame:
 
 @register("payee_risk")
 def payee_risk(df: pd.DataFrame) -> pd.DataFrame:
+    """Payee features. Rows without a receiver get NaN and are not events for any payee."""
     cols = ["payee_uniq_senders_24h", "payee_cnt_24h", "payee_new_for_sender"]
-    if df["receiver_id"].isna().all():
+    n = len(df)
+    has = df["receiver_id"].notna().to_numpy()
+    if not has.any():
         return pd.DataFrame(np.nan, index=df.index, columns=cols)
-    ts, snd, rcv = df["ts"].to_numpy(), df["sender_id"].to_numpy(), df["receiver_id"].astype(str).to_numpy()
-    uniq = np.zeros(len(df))
-    cnt = np.zeros(len(df))
+    pos = np.flatnonzero(has)
+    ts, snd = df["ts"].to_numpy()[pos], df["sender_id"].to_numpy()[pos]
+    rcv = df["receiver_id"].astype(str).to_numpy()[pos]
+    uniq, cnt = np.zeros(len(pos)), np.zeros(len(pos))
     for idx in _groups(rcv, ts):
         t, s = ts[idx], snd[idx]
         live: Counter = Counter()
@@ -148,7 +152,7 @@ def payee_risk(df: pd.DataFrame) -> pd.DataFrame:
                 left += 1
             uniq[idx[i]], cnt[idx[i]] = len(live), add - left
     pair_first = pd.Series(ts).groupby([snd, rcv]).transform("min").to_numpy()
-    return pd.DataFrame(
-        {"payee_uniq_senders_24h": uniq, "payee_cnt_24h": cnt, "payee_new_for_sender": (ts == pair_first).astype(float)},
-        index=df.index,
-    )
+    out = {c: np.full(n, np.nan) for c in cols}
+    out["payee_uniq_senders_24h"][pos], out["payee_cnt_24h"][pos] = uniq, cnt
+    out["payee_new_for_sender"][pos] = (ts == pair_first).astype(float)
+    return pd.DataFrame(out, index=df.index)
