@@ -88,6 +88,27 @@ def indian_fin_to_standard(tx: pd.DataFrame, cards: pd.DataFrame | None = None,
     return out.sort_values("ts", kind="stable").reset_index(drop=True)
 
 
+def ibm_aml_to_standard(df: pd.DataFrame) -> pd.DataFrame:
+    """IBM AML transactions (synthetic, with labelled laundering rings). An account is bank id plus account id.
+
+    Amounts are in the payment currency, and currencies differ across rows, so they are not comparable; the
+    currency and a cross-currency flag are kept as features. Amount Received is dropped (it is the other side's view).
+    """
+    snd = df["From Bank"].astype(str) + "|" + df["Account"].astype(str)
+    rcv = df["To Bank"].astype(str) + "|" + df["Account.1"].astype(str)
+    ts = pd.to_datetime(df["Timestamp"], format="%Y/%m/%d %H:%M").astype("datetime64[s]").astype("int64")
+    core = pd.DataFrame({
+        "txn_id": np.arange(len(df), dtype="int64"), "ts": ts.to_numpy(), "amount_minor": _to_minor(df["Amount Paid"]),
+        "sender_id": snd.to_numpy(), "receiver_id": rcv.to_numpy(), "label": df["Is Laundering"].astype("int64").to_numpy(),
+        "source": "ibm_aml",
+    })
+    used = {"Timestamp", "From Bank", "Account", "To Bank", "Account.1", "Amount Received", "Amount Paid", "Is Laundering"}
+    out = _with_extras(core, df, used)
+    out["x_self_transfer"] = (snd.to_numpy() == rcv.to_numpy()).astype("int64")
+    out["x_cross_currency"] = (df["Receiving Currency"].to_numpy() != df["Payment Currency"].to_numpy()).astype("int64")
+    return out.sort_values("ts", kind="stable").reset_index(drop=True)
+
+
 def paysim_to_standard(df: pd.DataFrame) -> pd.DataFrame:
     """PaySim: `step` is hours; sender nameOrig, receiver nameDest. Row order gives a unique id."""
     core = pd.DataFrame(

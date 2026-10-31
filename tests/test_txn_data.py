@@ -140,3 +140,32 @@ def test_time_split_rejects_bad_fraction():
     df = paysim_to_standard(_paysim_frame())
     with pytest.raises(ValueError):
         time_split(df, train_frac=1.0)
+
+
+def _ibm_frame():
+    return pd.DataFrame({
+        "Timestamp": ["2022/09/01 00:20", "2022/09/01 00:10", "2022/09/01 00:10"],
+        "From Bank": [10, 3208, 5], "Account": ["8000EBD30", "8000F4580", "A1"],
+        "To Bank": [10, 1, 5], "Account.1": ["8000EBD30", "8000F5340", "B1"],
+        "Amount Received": [100.0, 5.5, 20.0], "Receiving Currency": ["US Dollar", "US Dollar", "Euro"],
+        "Amount Paid": [100.0, 5.5, 22.0], "Payment Currency": ["US Dollar", "US Dollar", "US Dollar"],
+        "Payment Format": ["Reinvestment", "Cheque", "Wire"], "Is Laundering": [0, 0, 1],
+    })
+
+
+def test_ibm_aml_maps_accounts_time_and_label():
+    from agentshield.txn.loaders import ibm_aml_to_standard
+    df = ibm_aml_to_standard(_ibm_frame())
+    validate_standard(df)
+    assert df["ts"].is_monotonic_increasing and df["source"].unique().tolist() == ["ibm_aml"]
+    assert df["sender_id"].tolist()[2] == "10|8000EBD30" and set(df["receiver_id"]) == {"10|8000EBD30", "1|8000F5340", "5|B1"}
+    assert df["label"].sum() == 1 and sorted(df["amount_minor"].tolist()) == [550, 2200, 10000]
+    assert df["txn_id"].is_unique
+
+
+def test_ibm_aml_flags_self_transfer_and_cross_currency():
+    from agentshield.txn.loaders import ibm_aml_to_standard
+    df = ibm_aml_to_standard(_ibm_frame()).set_index("sender_id")
+    assert df.loc["10|8000EBD30", "x_self_transfer"] == 1 and df.loc["5|A1", "x_self_transfer"] == 0
+    assert df.loc["5|A1", "x_cross_currency"] == 1 and df.loc["10|8000EBD30", "x_cross_currency"] == 0
+    assert "x_Amount Received" not in df.columns

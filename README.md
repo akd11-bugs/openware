@@ -8,11 +8,12 @@ A risk API for fintechs. One call checks a payment for fraud, flags unusual beha
 | --- | --- | --- |
 | Fraud model, all card fields | AUC 0.903, catches 41.7% of fraud at 1% false alarms | IEEE-CIS, later time period, scored once. Rules-only baseline: 0.730 and 8.0% |
 | Fraud model for the API (23 portable fields) | AUC 0.788, catches 11.8% at 1% false alarms | Only uses fields any feed can supply |
+| Mule detection, account graph features | PaySim: AUC 0.971, catches 75.2% at 1% false alarms (without graph features 0.944 and 50.5%). IBM AML: AUC 0.982 and 73.9% (without 0.946 and 50.4%) | Both datasets are synthetic. Gains are largest for fan-in, fan-out and gather-scatter rings and small for cycles |
 | Anomaly detector, rapid repeats | Fraud is 2.2x more common in flagged rows | Real card data, flags 6% of traffic, so it is noisy |
 | Agent verification | 43 attack tests pass, about 43 microseconds per check | Forged, replayed, expired and other attacks |
 | API over local HTTP | p50 0.8 ms, p99 1.4 ms, about 1,200 requests per second | Excludes a network hop and a real Redis lookup |
 
-The Kaggle winner scored 0.9459 on a hidden test set. Ours is a different test, so the two numbers are not comparable. 181 tests pass.
+The Kaggle winner scored 0.9459 on a hidden test set. Ours is a different test, so the two numbers are not comparable. 188 tests pass.
 
 ## How we got there
 
@@ -28,6 +29,7 @@ The Kaggle winner scored 0.9459 on a hidden test set. Ours is a different test, 
 - An early score of 0.917 on an Indian dataset was a leak. A card status field carried the label. The honest score was 0.838.
 - Our first amount detector flagged 11.5% of all traffic. Amounts span orders of magnitude, so we moved it to a log scale.
 - Features that hurt the big model helped the thin one, so a single verdict on a feature is not safe.
+- PaySim's balance fields give fraud away (AUC 0.9999), so the mule results leave them out.
 - A payer and merchant in different cities is normal for UPI, so we dropped the distance feature we had planned.
 - The first API version shared state across tenants and trusted client timestamps. Both are fixed.
 - Validation looked better than the test period by 0.025 AUC, because we tuned on it.
@@ -37,7 +39,7 @@ The Kaggle winner scored 0.9459 on a hidden test set. Ours is a different test, 
 
 - Run a shadow mode pilot on a real fintech's data. This is the biggest gap, since nothing here is Indian traffic.
 - Use richer fields such as payee history, device IDs and KYC status.
-- Benchmark mule ring detection on PaySim. It is the main idea not yet built.
+- Test mule detection on real bank data with labelled mule accounts, and build the online version of the graph features.
 - Move the feature and nonce state to Redis, and add Kafka.
 - Add rate limits, and bind agent checks to a tenant and a domain.
 - Try Isolation Forest next to the rule detectors.

@@ -1,9 +1,23 @@
 # AgentShield: Product Requirements Document (draft for investor review)
 
-Status: draft v0.1, 2026-10-29. Items marked **TODO** need founder input; nothing in this document is an invented market or traction figure.
+Status: draft v0.2, 2026-10-31. Items marked **TODO** need founder input; nothing in this document is an invented market or traction figure.
 
 ## 1. One-line summary
 AgentShield is a risk API for fintechs that answers two questions on every login, KYC or payment event: **is this AI agent genuinely who and what it claims to be**, and **is the money going to a mule network?**
+
+## What we have built and measured
+A working prototype on public data. Nothing here is Indian traffic. Test numbers come from a later time period than training, were scored once per model, and leave a one week gap for late fraud labels.
+
+| Piece | Result | How to read it |
+| --- | --- | --- |
+| Transaction fraud, all card fields (IEEE-CIS, real cards) | AUC 0.903, catches 41.7% of fraud at 1% false alarms. Rules only: 0.730 and 8.0% | Solid on real card data. The Kaggle winner scored 0.9459 on a hidden test, which is a different test |
+| Transaction fraud, portable fields only | AUC 0.788, catches 11.8% at 1% false alarms | What an API can rely on from any feed. Weak, so it needs each customer's own data |
+| Mule detection, account graph features (PaySim and IBM AML, both synthetic) | PaySim: AUC 0.971 and 75.2% caught at 1% false alarms, against 0.944 and 50.5% without graph features (rules: 0.869 and 22.9%). IBM AML: AUC 0.982 and 73.9%, against 0.946 and 50.4% | Graph features add about 23 to 25 points of recall on both. On IBM AML the gain is about 22 to 27 points for fan-in, fan-out and gather-scatter rings, and only 7 to 11 for cycles and bipartite rings. At the strictest budget (0.1%) the graph model caught more on IBM AML (47.1% against 16.0%) and less on PaySim (26.4% against 40.1%) |
+| Agent verification | 43 attack tests pass, about 43 microseconds per check | Forged, replayed, expired and mis-scoped requests are blocked or challenged |
+| Anomaly detector, rapid repeats (IEEE-CIS) | Fraud is 2.2 times more common in flagged rows | Flags 6% of traffic, so it is noisy |
+| Scoring API over local HTTP | p50 0.8 ms, p99 1.4 ms | Leaves out a network hop and a real Redis lookup |
+
+What went wrong along the way matters as much as the scores. An early 0.917 on an Indian dataset was a leak from a card status field, and the honest figure was 0.838. PaySim's balance fields give fraud away (AUC 0.9999), so we report results without them. A security review of our first API found cross-tenant leakage and a forged timestamp attack, both fixed.
 
 ## 2. Problem
 - AI agents are starting to act and pay on behalf of users. Payment networks and the web are publishing signing standards for them (Visa Trusted Agent Protocol, Web Bot Auth, AP2), but a standard only defines the signature. Someone has to enforce it safely.
@@ -24,7 +38,7 @@ All figures below come from news reports or secondary summaries retrieved 2026-1
 **Data availability:** real transaction-level Indian fraud data is not public. Public India-labelled UPI datasets on Kaggle appear synthetic and unverified, so we will use public global benchmarks for method validation, an India-style synthetic generator for stress and latency tests, and a design-partner pilot for real evidence.
 
 ## 3. Product
-Two segments behind one API.
+Two segments behind one API, sitting on a thin transaction fraud layer that gives every customer a score from day one.
 
 **Segment 1: Agent trust verification.** Deterministic, fail-closed verification of signed agent requests. No ML in the verifier. Outputs a verification state (`verified`, `invalid`, `unverified`), an agent tier, and reason codes.
 
@@ -65,12 +79,12 @@ Human-vs-bot behavioural SDK, API-abuse guard, deepfake KYC, UPI Reserve Pay and
 
 | Area | Metric | Target | Status |
 | --- | --- | --- | --- |
-| Verifier correctness | Forged, expired, replayed, altered-mandate vectors rejected | 100% of vectors, zero fail-open paths | Not started |
-| Verifier robustness | Key-store or nonce-store outage | Never returns allow | Not started |
-| Mule detection | Recall at a fixed false-positive rate vs a rules-only baseline | **TODO**: set after first benchmark | Not started |
-| Generalisation | Same result direction across PaySim, IEEE-CIS, Amazon FDB, Bank Account Fraud (IBM AML if available) | Lift on every dataset; report the spread | Not started |
-| Fairness | Per-group false-positive rate on Bank Account Fraud | **TODO** threshold | Not started |
-| Latency | `/v1/assess` p99 | < 100 ms, tested at 3x expected peak | Not started |
+| Verifier correctness | Forged, expired, replayed, altered-mandate vectors rejected | 100% of vectors, zero fail-open paths | Met on the prototype: 43 attack tests and a hostile review. Not yet tested against Visa's own sample agent |
+| Verifier robustness | Key-store or nonce-store outage | Never returns allow | Met in tests: an outage returns challenge |
+| Mule detection | Recall at a fixed false-positive rate vs a rules-only baseline | Beat rules and a plain model on a real labelled ring dataset | Beaten on PaySim (+25 points) and on IBM AML (+23 points) at 1% false alarms. Both are synthetic, so real bank data is still needed |
+| Generalisation | Same result direction across several datasets | Lift on every dataset; report the spread | Partly: IEEE-CIS (real), PaySim, two Indian-style sets. Labels in the Indian sets follow generator rules |
+| Fairness | Per-group false-positive rate on Bank Account Fraud | **TODO** threshold | Not started. Gender, age and similar fields are already excluded from the models |
+| Latency | `/v1/assess` p99 | < 100 ms, tested at 3x expected peak | p99 1.4 ms on local HTTP. Not tested at peak load or with Redis |
 | Pilot | Shadow-mode recall and false-positive rate on a customer's real traffic | **TODO**: agree with design partner | Not started |
 
 Honesty rule: public datasets (several synthetic) show the method works, not how it performs on Indian production traffic. The pilot is the proof gate.
@@ -80,7 +94,7 @@ Honesty rule: public datasets (several synthetic) show the method works, not how
 - **Agent trust:** no public dataset of signed agent traffic exists, so we generate vectors (valid, wrong key, expired, replayed, altered, tag mismatch, etc.) plus property-based mutation tests.
 - **Hijacked agents:** replay AgentDojo and InjecAgent goals as payee-drift and over-cap scenarios (stretch).
 - **Continuous:** a red-team harness against staging on every release; every miss becomes a test vector or rule.
-- **Decision gate:** if graph features do not beat the baseline, the pitch leads with agent trust and mule detection moves to phase 2.
+- **Decision gate:** if graph features do not beat the baseline, the pitch leads with agent trust and mule detection moves to phase 2. **Result:** they beat both the rules and the plain model on PaySim, so mule detection stays in the pitch. IBM AML, which IBM built to mimic laundering rings, shows the same result. Both datasets are synthetic, though, and PaySim builds fraud as a new account followed by a cash out, which graph features catch by design. Real bank data with labelled mule accounts is the next test.
 
 ## 9. Why it can win (to be tested, not assumed)
 - **Enforcement, not just standards:** safe verification is the hard part, as the sample-code review shows.
@@ -105,6 +119,8 @@ See [architecture.md](../architecture.md). Stack: Python 3.12, FastAPI, Redis, K
 | --- | --- |
 | Protocols are drafts and still changing (Web Bot Auth drafts have been renamed and replaced; AP2 partly draft; NPCI agent protocol not final) | One module per protocol version; add rather than edit |
 | Public benchmarks may not transfer to real fintech data | Pilot as proof gate; report spread across datasets |
+| The portable model is weak (0.788 AUC) and the graph result comes from synthetic data | Say so plainly; retrain on each customer's labels in shadow mode |
+| On PaySim the graph model loses to the plain model at the strictest false alarm budget (it wins on IBM AML) | Tune per tenant, and use graph signals for challenge, not block |
 | Mule detection needs real labelled data | Shadow mode on pilot data first |
 | Cross-customer sharing raises privacy and regulatory issues | Hashed IDs only, opt-in, DPDP review before launch |
 | Verifier bug lets attackers through | Test vectors first, hostile review subagent, security review, human diff review |
@@ -112,11 +128,11 @@ See [architecture.md](../architecture.md). Stack: Python 3.12, FastAPI, Redis, K
 | Competitors add agent verification | Speed, depth on enforcement, shared network signals |
 
 ## 13. Timeline
-**Phase 1 (to 2026-11-05):** PRD, mule benchmark on available datasets, verifier prototype with test vectors, architecture and roadmap docs.
+**Phase 1 (to 2026-11-05):** done so far: PRD, fraud model, anomaly detectors, verifier prototype, scoring API, mule benchmarks on PaySim and IBM AML, architecture and roadmap docs. Still to do: a one page summary, a demo script, and a feature store warm-up so the demo does not start cold.
 **Phase 2 (after the meeting):** platform skeleton (weeks 1-2), production verifiers (3-6), graph and mule detection with shadow mode (5-8), reputation and drift (7-9), red-team harness (9-10), ML in shadow and load test (10-12), then pilot and second customer. See [roadmap.md](../roadmap.md).
 
 ## 14. Open questions
 - Which customer segments lead, and is FastFlowPe confirmed as design partner?
 - Do we have any traction, pricing conversations or market figures to include?
-- Access to IBM AML or Elliptic data (Kaggle credentials)?
+- Real bank data with labelled mule accounts. We have tested on PaySim and IBM AML, both synthetic.
 - Which agent protocol do first customers actually see traffic for?

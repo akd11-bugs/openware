@@ -1,45 +1,41 @@
 # Roadmap
 
-Living document. Update it whenever scope, priorities, or timelines change.
-Last updated: 2026-10-28
-
-## Vision
-
-_TODO: one or two sentences on what openware is and who it is for._
-
-## Guiding principles
-
-- _TODO: e.g. open, simple, well-documented_
-
-## Now (in progress)
-
-| Item | Owner | Status | Notes |
-| ---- | ----- | ------ | ----- |
-| Project scaffolding and docs (roadmap, changes, architecture) | | In progress | No code yet |
-
-## Next (planned)
-
-- [ ] Define scope and requirements
-- [ ] Choose stack and finalize architecture (see [architecture.md](architecture.md))
-- [ ] Set up repo tooling: lint, tests, CI
-- [ ] First working vertical slice (end-to-end happy path)
-
-## Later (ideas / unscheduled)
-
-- [ ] _TODO_
-
-## Milestones
-
-| Milestone | Target date | Definition of done |
-| --------- | ----------- | ------------------ |
-| M0: Foundations | _TBD_ | Docs written, stack chosen, CI green |
-| M1: MVP | _TBD_ | Core user flow works end to end |
-| M2: Beta | _TBD_ | Hardened, documented, first external users |
+Last updated 2026-10-31. The meeting with investors is by 2026-11-05.
 
 ## Done
 
-- 2026-10-28: Repository initialized
+- Transaction fraud model on real card data, with a time split, a label delay gap and a held-out test run.
+- Rules baselines, tuning, a three-model blend (kept out, it is 5x slower for almost no gain).
+- Agent verifier with 43 attack tests.
+- Anomaly detectors: amount outliers, structuring, rapid repeats, new payee.
+- Real-time feature store checked against the batch code.
+- Scoring API with tenant keys, thresholds and reason codes, plus fixes from a security review.
+- Drift monitoring, model cards, and mule benchmarks on PaySim and IBM AML.
+
+## Now (before 2026-11-05)
+
+- One page summary and a five minute demo script.
+- Warm up the feature store so the demo does not start cold (the replay challenged 15% of traffic against a 5% budget).
+- Confirm the design partner and add any real traction or pricing to the PRD.
+- Check the RBI and NPCI figures in the PRD against the primary sources.
+
+## Next (after the meeting)
+
+- Test mule detection on real bank data with labelled mule accounts, and build the online version of the graph features. Multi-hop features for cycles, where the gain was smallest.
+- Redis for shared state, Kafka for events, and a proxy for rate limits.
+- Shadow mode pilot on a fintech's own data, with per-tenant recalibration.
+- Per-tenant agent checks, and a real key directory with fetch limits.
+- Try Isolation Forest next to the rule detectors.
+- Data protection review before any customer data is used.
+
+## Later
+
+- Human versus bot signals in the browser, API abuse guard, deepfake KYC checks.
+- Cross-customer agent reputation using hashed identifiers only.
+- Analyst dashboard and a per-tenant rule editor.
 
 ## Open questions
 
-- _TODO_
+- Which two or three customer types do we lead with?
+- Is FastFlowPe confirmed as the design partner?
+- Can we get real labelled mule data, or do we wait for the pilot?
