@@ -9,7 +9,10 @@ restricted to pandas/numpy-style expressions, written to a file and run only in 
 """
 import ast
 import json
+import os
 import re
+import shutil
+import sys
 
 ALLOWED_PARAMS = {
     "learning_rate", "num_leaves", "min_child_samples", "feature_fraction", "bagging_fraction",
@@ -67,7 +70,40 @@ def safe_child_env(env: dict, root) -> dict:
     """Environment for the subprocess that runs proposed code: no API keys, tokens or other secrets are inherited."""
     out = {k: v for k, v in env.items() if k in SAFE_ENV_KEYS}
     out["PYTHONPATH"] = str(root)
+    out["PYTHONDONTWRITEBYTECODE"] = "1"  # the sandbox allows writes only to named folders
     return out
+
+
+class SandboxUnavailable(RuntimeError):
+    pass
+
+
+def _profile_path(path) -> str:
+    p = os.path.realpath(str(path))
+    if any(c in p for c in '"\\\n\r'):
+        raise ValueError("path cannot be put in a sandbox profile")
+    return p
+
+
+def sandbox_command(cmd: list, root, write_dirs=(), allow_unsandboxed: bool = False) -> list:
+    """Wrap a command so proposed code cannot reach the network, write outside `write_dirs`, or read credentials.
+
+    macOS uses sandbox-exec. Elsewhere there is no sandbox here, so it refuses unless AGENTSHIELD_ALLOW_UNSANDBOXED=1 or
+    allow_unsandboxed is set; that is a choice to make on purpose, not a default.
+    """
+    if sys.platform == "darwin" and shutil.which("sandbox-exec"):
+        home = os.path.expanduser("~")
+        secrets = " ".join(f'(subpath "{_profile_path(os.path.join(home, d))}")' for d in (".kaggle", ".ssh", ".aws", ".gnupg"))
+        writes = " ".join(f'(subpath "{_profile_path(d)}")' for d in write_dirs)
+        profile = (
+            "(version 1)\n(allow default)\n(deny network*)\n"
+            f'(deny file-read* {secrets} (regex #"/\\.env($|\\.)"))\n'
+            f'(deny file-write* (require-not (require-any (subpath "/dev") {writes})))\n'
+        )
+        return ["sandbox-exec", "-p", profile, *cmd]
+    if allow_unsandboxed or os.environ.get("AGENTSHIELD_ALLOW_UNSANDBOXED") == "1":
+        return list(cmd)
+    raise SandboxUnavailable("no sandbox available on this platform; set AGENTSHIELD_ALLOW_UNSANDBOXED=1 to run without one")
 
 
 def ensure_new(path) -> None:
