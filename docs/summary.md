@@ -1,6 +1,6 @@
 # AgentShield in one page
 
-**What it is.** A risk API for fintechs. One call checks a payment for fraud, flags unusual behaviour, and checks whether a signed AI agent is who it claims to be. Today it is a working prototype built and tested on public data. It is not a production system and it has not seen Indian traffic.
+**What it is.** Agent trust verification for fintechs and merchants: one call checks that a signed AI agent request is genuine, fresh, not replayed and allowed on that route. Transaction fraud scoring and anomaly detectors ride on the same API as side products. Today it is a working prototype built and tested on public data. It is not a production system and it has not seen Indian traffic.
 
 ## Why this, why now
 - AI agents are starting to pay on behalf of people. Visa and others publish ways for agents to sign their requests, but a standard only describes the signature. Someone has to enforce it safely.
@@ -21,7 +21,7 @@
 - **No Indian data.** The fraud model uses US card data. The Indian-style datasets are synthetic, and their labels follow generator rules, so their scores say little about real accuracy.
 - **The mule results come from synthetic data.** Real bank data with labelled mule accounts is the missing test.
 - **The model for any feed is weak.** Using only fields every feed can provide, it catches about 12% of fraud at 1% false alarms. It needs each customer's own data to be useful.
-- **Redis is tested against a faithful fake, not a live server.** Several workers are not supported yet.
+- **Redis replay protection passed tests against a real Redis 7 (one machine).** Several workers are not supported yet, because feature state is still in memory.
 
 ## How we kept ourselves honest
 Splits are by time with a gap for late labels. Each model is scored once on held-out data. Every feature has a test that proves it only looks backwards. Three independent reviews (code, security, tests) found real problems, which are fixed. An early score of 0.917 turned out to be a leak and we corrected it to 0.838.

@@ -142,3 +142,99 @@ def test_the_number_of_warm_events_is_capped(model, tmp_path):
     p = write_warm(tmp_path / "warm.jsonl", n=20)
     with pytest.raises(RuntimeError, match="at most"):
         build(model, AGENTSHIELD_WARM_START=str(p), AGENTSHIELD_WARM_START_MAX="10")
+
+
+def _tenants_file(tmp_path, entries):
+    p = tmp_path / "tenants.json"
+    p.write_text(json.dumps(entries))
+    return str(p)
+
+
+def _build_multi(model, path):
+    import importlib, os
+    os.environ["AGENTSHIELD_API_KEY"] = KEY
+    os.environ["AGENTSHIELD_MODEL_DIR"] = str(model)
+    main = importlib.import_module("agentshield.serving.main")
+    return main.build({"AGENTSHIELD_TENANTS": path, "AGENTSHIELD_MODEL_DIR": str(model)})
+
+
+def test_each_tenant_authenticates_with_its_own_key_only(model, tmp_path):
+    from agentshield.serving.tenants import hash_key
+    a, b = "a" * 40, "b" * 40
+    app = _build_multi(model, _tenants_file(tmp_path, [{"tenant_id": "a", "key_hashes": [hash_key(a)]},
+                                                       {"tenant_id": "b", "key_hashes": [hash_key(b)]}]))
+    reg = app.state.tenants
+    assert reg.authenticate(a).tenant_id == "a" and reg.authenticate(b).tenant_id == "b"
+    assert reg.authenticate("c" * 40) is None
+
+
+def test_a_rotating_tenant_accepts_old_and_new_keys_until_the_old_is_removed(model, tmp_path):
+    from agentshield.serving.tenants import hash_key
+    old, new = "o" * 40, "n" * 40
+    both = _build_multi(model, _tenants_file(tmp_path, [{"tenant_id": "a", "key_hashes": [hash_key(new), hash_key(old)]}]))
+    assert both.state.tenants.authenticate(old).tenant_id == both.state.tenants.authenticate(new).tenant_id == "a"
+    only_new = _build_multi(model, _tenants_file(tmp_path, [{"tenant_id": "a", "key_hashes": [hash_key(new)]}]))
+    assert only_new.state.tenants.authenticate(old) is None
+
+
+def test_a_key_shared_by_two_tenants_is_refused(model, tmp_path):
+    from agentshield.serving.tenants import hash_key
+    h = hash_key("s" * 40)
+    with pytest.raises(RuntimeError, match="more than one"):
+        _build_multi(model, _tenants_file(tmp_path, [{"tenant_id": "a", "key_hashes": [h]}, {"tenant_id": "b", "key_hashes": [h]}]))
+
+
+@pytest.mark.parametrize("entry", [{"tenant_id": "a", "key_hashes": ["notahash"]}, {"tenant_id": "a", "key_hashes": []},
+                                   {"key_hashes": ["0" * 64]}, {"tenant_id": "", "key_hashes": ["0" * 64]},
+                                   {"tenant_id": 5, "key_hashes": ["0" * 64]},
+                                   {"tenant_id": "a", "key_hashes": ["0" * 64], "agnet": {}},
+                                   {"tenant_id": "a", "key_hashes": ["0" * 64], "block_fp": 0.01}])
+def test_a_bad_tenant_entry_is_refused(model, tmp_path, entry):
+    with pytest.raises(RuntimeError, match="tenant"):
+        _build_multi(model, _tenants_file(tmp_path, [entry]))
+
+
+class _Redis:
+    def __init__(self, up):
+        self.up = up
+
+    def ping(self):
+        if not self.up:
+            raise ConnectionError("down")
+        return True
+
+
+def _ready(model, up=None):
+    from fastapi.testclient import TestClient
+    extra = {} if up is None else {"AGENTSHIELD_AGENT_DIRECTORY": "1", "AGENTSHIELD_REDIS_URL": "redis://x"}
+    import importlib, os
+    os.environ["AGENTSHIELD_API_KEY"] = KEY
+    os.environ["AGENTSHIELD_MODEL_DIR"] = str(model)
+    main = importlib.import_module("agentshield.serving.main")
+    env = {"AGENTSHIELD_API_KEY": KEY, "AGENTSHIELD_MODEL_DIR": str(model), **extra}
+    app = main.build(env, redis_from_url=lambda u: _Redis(up)) if up is not None else main.build(env)
+    return TestClient(app).get("/readyz")
+
+
+def test_ready_without_redis(model):
+    assert _ready(model).status_code == 200
+
+
+def test_ready_when_redis_answers(model):
+    assert _ready(model, up=True).status_code == 200
+
+
+def test_not_ready_when_redis_is_down(model):
+    assert _ready(model, up=False).status_code == 503
+
+
+def test_an_empty_tenants_file_is_refused_with_a_clear_error(model, tmp_path):
+    with pytest.raises(RuntimeError, match="tenant"):
+        _build_multi(model, _tenants_file(tmp_path, []))
+
+
+def test_two_tenants_with_the_same_id_are_refused(model, tmp_path):
+    from agentshield.serving.tenants import hash_key
+    with pytest.raises(RuntimeError, match="tenant_id"):
+        _build_multi(model, _tenants_file(tmp_path, [{"tenant_id": "a", "key_hashes": [hash_key("1" * 40)]},
+                                                      {"tenant_id": "a", "key_hashes": [hash_key("2" * 40)]}]))

@@ -1,0 +1,40 @@
+# API + Redis + nginx on one server. nginx shares the API's network so the same deploy/nginx.conf works unchanged.
+x-logging: &logging  # docker keeps at most 5 files of 10 MB per service, so logs cannot fill the disk
+  driver: json-file
+  options: {max-size: "10m", max-file: "5"}
+
+services:
+  api:
+    logging: *logging
+    build: .
+    env_file: ${AGENTSHIELD_ENV:-deploy/production.env}
+    volumes:
+      - ./models:/app/models:ro
+      - auditlog:/audit
+      - ${AGENTSHIELD_TENANTS_FILE:-./deploy/tenants.json}:/etc/agentshield/tenants.json:ro
+    ports: ["${HTTPS_PORT:-443}:443", "${HTTP_PORT:-80}:80"]  # published here because nginx joins this container's network
+    depends_on: [redis]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/readyz', timeout=2)"]
+      interval: 10s
+      retries: 3
+  redis:
+    logging: *logging
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: ["redisdata:/data"]
+    restart: unless-stopped
+  nginx:
+    logging: *logging
+    image: nginx:1.27-alpine
+    network_mode: "service:api"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${AGENTSHIELD_CERTS:-./deploy/certs}:/etc/ssl/agentshield:ro
+    depends_on:
+      api: {condition: service_healthy}
+    restart: unless-stopped
+volumes:
+  redisdata:
+  auditlog:
