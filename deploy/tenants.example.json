@@ -1,0 +1,8 @@
+[
+  {
+    "tenant_id": "shop-a",
+    "key_hashes": ["<sha256 hex of the current key>", "<sha256 hex of an old key, only while rotating>"],
+    "agent": {"authorities": ["shop.example.com"], "paths": ["/product", "/checkout"],
+              "tag_routes": {"agent-browser-auth": ["/product"], "agent-payer-auth": ["/checkout"]}}
+  }
+]

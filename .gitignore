@@ -11,3 +11,10 @@ models/
 *.key
 .DS_Store
 catboost_info/
+
+# production secrets and local certs
+deploy/production.env
+deploy/tenants.json
+deploy/certs/
+backups/
+private/

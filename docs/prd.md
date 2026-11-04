@@ -3,7 +3,7 @@
 Status: draft v0.2, 2026-10-31. Items marked **TODO** need founder input; nothing in this document is an invented market or traction figure.
 
 ## 1. One-line summary
-AgentShield is a risk API for fintechs that answers two questions on every login, KYC or payment event: **is this AI agent genuinely who and what it claims to be**, and **is the money going to a mule network?**
+AgentShield is agent trust verification for fintechs and merchants. On every agent request it answers one question: **is this AI agent genuinely who and what it claims to be, and is it allowed here?** Transaction fraud scoring and anomaly detectors are side products on the same API. Mule-ring detection is a later product, pending real data.
 
 ## What we have built and measured
 A working prototype on public data. Nothing here is Indian traffic. Test numbers come from a later time period than training, were scored once per model, and leave a one week gap for late fraud labels.
@@ -39,11 +39,13 @@ All figures below come from news reports or secondary summaries retrieved 2026-1
 **Data availability:** real transaction-level Indian fraud data is not public. Public India-labelled UPI datasets on Kaggle appear synthetic and unverified, so we will use public global benchmarks for method validation, an India-style synthetic generator for stress and latency tests, and a design-partner pilot for real evidence.
 
 ## 3. Product
-Two segments behind one API, sitting on a thin transaction fraud layer that gives every customer a score from day one.
+One main product and two side products behind one API.
 
-**Segment 1: Agent trust verification.** Deterministic, fail-closed verification of signed agent requests. No ML in the verifier. Outputs a verification state (`verified`, `invalid`, `unverified`), an agent tier, and reason codes.
+**Main product: agent trust verification.** Deterministic, fail-closed verification of signed agent requests. No ML in the verifier. Outputs a verification state (`verified`, `invalid`, `unverified`), an agent tier, and reason codes.
 
-**Segment 2: Mule-ring detection.** Entity-graph features (fan-in, fan-out, shared accounts and devices, distance to confirmed fraud) plus rules, evaluated first in shadow mode.
+**Side products:** transaction fraud scoring (LightGBM, per-tenant thresholds) and anomaly detectors (amount spike, rapid repeats, structuring, new payee). Both give a customer a score from day one and collect labels in shadow mode.
+
+**Later: mule-ring detection.** Entity-graph features (fan-in, fan-out, shared accounts and devices, distance to confirmed fraud) plus rules. Benchmarked on synthetic data only, so it waits for real labelled data.
 
 **Decision API**
 - `POST /v1/assess` returns `action` (`allow` | `challenge` | `block`), `agent_tier`, `reasons[]` (coarse codes naming the rule that fired), `latency_ms`.
@@ -132,7 +134,7 @@ See [architecture.md](../architecture.md). Stack: Python 3.12, FastAPI, Redis, K
 | Cross-customer sharing raises privacy and regulatory issues | Hashed IDs only, opt-in, DPDP review before launch |
 | Verifier bug lets attackers through | Test vectors first, hostile review subagent, security review, human diff review |
 | Visa's public sample differs from the standard (camel-case `keyId`, no `@method` signed, query string inside the path, a registry where two agents share a key id) | Strict by default, with each difference an explicit setting. Tested against Visa's own signing code and sample registry |
-| The Redis nonce store is tested against a faithful fake client only | Run it against a live Redis before any multi-worker deployment |
+| The Redis nonce store passed 4 tests against a real Redis 7 on one machine; no multi-worker or network failure test yet | Run it across two real worker processes and a restart before a multi-worker deployment |
 | Timeline: original guide assumed 12 weeks for the full MVP | Narrowed to two segments; realistic range 16-20 weeks including real protocol work |
 | Competitors add agent verification | Speed, depth on enforcement, shared network signals |
 

@@ -17,6 +17,7 @@ def hash_key(api_key: str) -> str:
 class Tenant:
     tenant_id: str
     key_hash: str
+    old_key_hashes: tuple = ()  # keys still accepted while a customer rotates; drop them to retire the old key
     challenge_fpr: float = 0.05  # score above the threshold calibrated to this false-positive rate -> challenge
     block_fpr: float = 0.005  # ... -> block
     spike_ratio: float = 10.0  # online amount-spike flag: amount >= this many times the sender's average
@@ -57,6 +58,7 @@ class TenantRegistry:
         h = hash_key(api_key)
         found = None
         for t in self._tenants:  # compare against every tenant so timing does not reveal which one matched
-            if hmac.compare_digest(t.key_hash, h):
-                found = t
+            for kh in (t.key_hash, *t.old_key_hashes):
+                if hmac.compare_digest(kh, h):
+                    found = t
         return found

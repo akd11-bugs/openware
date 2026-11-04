@@ -151,6 +151,16 @@ def create_app(model_dir: Path, tenants: TenantRegistry, verifier: Verifier | No
     def healthz() -> dict:
         return {"status": "ok"}
 
+    @app.get("/readyz")
+    def readyz() -> dict:
+        ping = getattr(getattr(verifier, "nonces", None), "ping", None)  # only a networked nonce store has one
+        try:
+            if ping:
+                ping()
+        except Exception:  # noqa: BLE001 - any failure means not ready
+            raise HTTPException(status_code=503, detail="replay store unreachable") from None
+        return {"status": "ready"}
+
     @app.post("/v1/assess")
     def assess(body: AssessIn, tenant: Tenant = Depends(tenant_dep)) -> dict:
         t0 = time.perf_counter()

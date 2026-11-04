@@ -71,5 +71,5 @@ sequenceDiagram
 | One worker process | Several workers behind a proxy |
 | Records written straight from the request | Kafka for events, a data lake for training |
 | Model trained on public US card data | Retrained on each customer's own labels in shadow mode |
-| No rate limits | Limits and body size caps at a proxy |
+| Rate limits, body cap and TLS in an nginx config, run in Docker | The same on a real domain and certificate |
 | Agent keys from a registry file or a fetched key directory with signature checks, tested against a live public directory | The same, with monitoring and a per-tenant allowlist of directories |

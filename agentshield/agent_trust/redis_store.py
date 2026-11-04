@@ -4,7 +4,7 @@ Uses only SET key value NX PX ttl (atomic check and record) and INCR, through an
     RedisNonceStore(redis.Redis.from_url(url))
 Any client error raises StoreUnavailable, which the verifier turns into "unverified": a Redis outage can never
 become a free pass. A per key id counter, created with a TTL, caps how many nonces one key can mint per window.
-Tested here against a fake client that mimics those commands; it has not been run against a live Redis server.
+Tested against a fake client (tests/test_redis_nonce.py) and a real Redis 7 (tests/test_redis_live.py, needs AGENTSHIELD_TEST_REDIS_URL).
 """
 from .verifier import StoreUnavailable
 
@@ -12,6 +12,12 @@ from .verifier import StoreUnavailable
 class RedisNonceStore:
     def __init__(self, client, prefix: str = "agentshield:nonce:", max_per_key: int = 10_000, window_ms: int = 600_000) -> None:
         self.client, self.prefix, self.max_per_key, self.window_ms = client, prefix, max_per_key, window_ms
+
+    def ping(self) -> None:
+        try:
+            self.client.ping()
+        except Exception as e:  # noqa: BLE001
+            raise StoreUnavailable("nonce store error") from e
 
     def check_and_record(self, key: str, ttl: int) -> bool:
         counter = f"{self.prefix}count:{key.split(':', 1)[0]}"
